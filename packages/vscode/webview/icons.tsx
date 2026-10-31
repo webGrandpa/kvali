@@ -91,3 +91,12 @@ export function Chevron({ open }: { open: boolean }) {
     </svg>
   );
 }
+
+export function PhoneIcon() {
+  return (
+    <svg {...base} class="icon">
+      <rect x="4.5" y="1.8" width="7" height="12.4" rx="1.6" stroke="currentColor" stroke-width="1.4" />
+      <path d="M7 12h2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+    </svg>
+  );
+}

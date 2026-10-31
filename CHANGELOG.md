@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1 — 2026-10-31
+
+- Phone notifications are found at the top of the Agents view: "Get alerts on your phone" until they are set up, then "Phone alerts on · Show QR code". The card scrolls into view when it opens.
+
 ## 0.5.0 — 2026-10-31
 
 - **Phone notifications** through the free ntfy app (iPhone and Android): "needs you", a long task finished or stopped mid-plan, an error, API trouble, a quiet or vanished agent, and optionally each finished step, for every agent. One command sets it up with a QR code (**Kvali: Send Notifications to My Phone** or `kvali phone`); one window per machine sends, so each event arrives once.

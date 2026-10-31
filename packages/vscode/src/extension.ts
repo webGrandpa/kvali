@@ -312,6 +312,10 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
         phoneCard = false;
         pushState();
         return;
+      case 'showPhoneCard':
+        phoneCard = true;
+        pushState();
+        return;
       default:
         return;
     }

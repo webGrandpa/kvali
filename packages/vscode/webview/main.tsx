@@ -1,5 +1,5 @@
 import { render } from 'preact';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import {
   STATUS_LABEL,
   currentTask,
@@ -21,7 +21,7 @@ import {
   type TaskItem,
 } from '@kvali/core/browser';
 import type { FromWebview, PhoneView, Scope, ViewState } from '../src/messages.ts';
-import { Chevron, StatusIcon, TaskIcon } from './icons.tsx';
+import { Chevron, PhoneIcon, StatusIcon, TaskIcon } from './icons.tsx';
 
 declare function acquireVsCodeApi(): { postMessage(m: unknown): void; getState(): unknown; setState(s: unknown): void };
 const vscode = acquireVsCodeApi();
@@ -498,10 +498,15 @@ const PHONE_EVENT_LABEL: Record<string, string> = {
 };
 
 function PhoneCard({ phone }: { phone: PhoneView }) {
+  const ref = useRef<HTMLElement>(null);
+  // The card opens at the top of the panel: bring it into view if the list was scrolled.
+  useEffect(() => {
+    ref.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, []);
   const events = phone.events.map((e) => PHONE_EVENT_LABEL[e] ?? e);
   const self = !/^https:\/\/ntfy\.sh$/.test(phone.server);
   return (
-    <aside class="setup phone" aria-label="Phone notifications">
+    <aside class="setup phone" aria-label="Phone notifications" ref={ref}>
       <p class="setup-title">
         <b>Notifications on your phone</b>
       </p>
@@ -538,6 +543,27 @@ function PhoneCard({ phone }: { phone: PhoneView }) {
         </button>
       </div>
     </aside>
+  );
+}
+
+/** Always at the top: where phone notifications are set up, and where the QR code is found again. */
+function PhoneRow({ phone }: { phone: PhoneView | undefined }) {
+  return (
+    <div class="phone-row">
+      <PhoneIcon />
+      {phone ? (
+        <>
+          <span class="muted">Phone alerts on</span>
+          <button class="link" onClick={() => post({ type: 'showPhoneCard' })}>
+            Show QR code
+          </button>
+        </>
+      ) : (
+        <button class="link" onClick={() => post({ type: 'command', command: 'kvali.phoneSetup' })}>
+          Get alerts on your phone
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -614,7 +640,7 @@ function App() {
           </div>
         </aside>
       )}
-      {st.phoneCard && st.phone && <PhoneCard phone={st.phone} />}
+      {st.phoneCard && st.phone ? <PhoneCard phone={st.phone} /> : <PhoneRow phone={st.phone} />}
       <Counts sessions={sessions} />
       <Limits sessions={sessions} now={now} />
 
@@ -629,14 +655,6 @@ function App() {
             Repair
           </button>
         </aside>
-      )}
-
-      {!st.phone && groups.length > 0 && (
-        <p class="foot">
-          <button class="link" onClick={() => post({ type: 'command', command: 'kvali.phoneSetup' })}>
-            Get these alerts on your phone
-          </button>
-        </p>
       )}
 
       {st.snapshot.errors.map((e) => (

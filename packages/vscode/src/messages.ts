@@ -46,6 +46,7 @@ export type FromWebview =
   | { type: 'dismissSetup' }
   | { type: 'copy'; text: string }
   | { type: 'hidePhoneCard' }
+  | { type: 'showPhoneCard' }
   | {
       type: 'command';
       command:

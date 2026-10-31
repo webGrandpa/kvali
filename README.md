@@ -55,7 +55,7 @@ With the editor extension installed too, the plugin's heartbeat (`~/.kvali/live/
 
 Get a push on your phone when an agent needs you, finishes a long task (two minutes or more), fails, or goes quiet, for every agent Kvali sees.
 
-1. In VS Code run **Kvali: Send Notifications to My Phone** (or `kvali phone` in a terminal). Kvali makes a private topic and shows a QR code.
+1. At the top of the Kvali view click **Get alerts on your phone** (or run **Kvali: Send Notifications to My Phone**, or `kvali phone` in a terminal). Kvali makes a private topic and shows a QR code.
 2. Install the free **ntfy** app. On Android scan the code; on an iPhone tap **+** in ntfy and enter the topic.
 3. A test notification arrives. That's it.
 
@@ -70,7 +70,7 @@ Get a push on your phone when an agent needs you, finishes a long task (two minu
 **Editor extension** (VS Code ≥ 1.90, Antigravity, Cursor, Windsurf, VSCodium):
 
 - From a release: download `kvali-x.y.z.vsix`, then run **Extensions: Install from VSIX…** from the Command Palette (or `code --install-extension kvali-x.y.z.vsix`).
-- From source: `pnpm install && pnpm package`, which writes `packages/vscode/kvali-0.5.0.vsix`.
+- From source: `pnpm install && pnpm package`, which writes `packages/vscode/kvali-0.5.1.vsix`.
 
 Open the **Kvali** icon in the activity bar and click **Turn on** once. That is the whole setup: Kvali finds the agents on your machine, turns on "needs you" alerts and makes every agent keep a plan, so each task gets a real progress bar. Sessions from the last 24 hours appear automatically.
 
