@@ -21,9 +21,9 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       publisher: ${{ steps.version.outputs.publisher }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -46,7 +46,7 @@ jobs:
       - run: pnpm build
       - run: pnpm package
       - run: node scripts/pack-cli.mjs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release
           if-no-files-found: error
@@ -61,7 +61,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release
           path: out
@@ -84,10 +84,11 @@ jobs:
     permissions:
       id-token: write # Marketplace trusted publishing: no token is stored anywhere
     steps:
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - uses: actions/download-artifact@v4
+          package-manager-cache: false
+      - uses: actions/download-artifact@v8
         with:
           name: release
           path: out
@@ -104,11 +105,12 @@ jobs:
       - name: Open VSX is not set up yet
         if: env.OVSX_PAT == ''
         run: echo "::warning::Add the OVSX_PAT repository secret to publish to Open VSX (see RELEASING.md)."
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: env.OVSX_PAT != ''
         with:
           node-version: 22
-      - uses: actions/download-artifact@v4
+          package-manager-cache: false
+      - uses: actions/download-artifact@v8
         if: env.OVSX_PAT != ''
         with:
           name: release
@@ -138,13 +140,14 @@ jobs:
     permissions:
       id-token: write # npm trusted publishing and provenance: no token is stored anywhere
     steps:
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
       - name: npm 11.5.1 or newer (trusted publishing)
         run: npm install -g npm@11
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release
           path: out

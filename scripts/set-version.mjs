@@ -16,8 +16,9 @@ if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version ?? '')) {
   process.exit(2);
 }
 
-for (const pkg of ['core', 'cli', 'vscode']) {
-  const file = path.join(ROOT, 'packages', pkg, 'package.json');
+// The Claude Code plugin too: Claude Code keeps a plugin installed from GitHub per version,
+// so a release reaches those users only under a new version.
+for (const file of ['core', 'cli', 'vscode'].map((p) => path.join(ROOT, 'packages', p, 'package.json')).concat(path.join(ROOT, 'packages', 'claude-plugin', '.claude-plugin', 'plugin.json'))) {
   const text = await readFile(file, 'utf8');
   await writeFile(file, text.replace(/("version":\s*")[^"]+(")/, `$1${version}$2`));
 }

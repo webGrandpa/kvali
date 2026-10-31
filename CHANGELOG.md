@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1 — 2026-10-31
+
+- The extension's listing has a plainer name and keywords: "Kvali — AI Agent Progress".
+- The release and CI workflows use the current GitHub Actions (Node 24).
+- The Claude Code plugin's version follows Kvali's, so a plugin installed from GitHub (`/plugin install kvali --marketplace webGrandpa/kvali`) gets each release with `claude plugin update`.
+
 ## 0.6.0 — 2026-10-31
 
 - **Turn on installs Kvali's Claude Code plugin** with Claude Code's own `claude plugin` command (found inside the Claude Code editor extension when there is no `claude` on PATH). No terminal step, and Kvali keeps the plugin updated: Claude Code reads it in place from `~/.kvali/claude-plugin`.

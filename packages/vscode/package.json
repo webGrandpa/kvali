@@ -1,8 +1,8 @@
 {
   "name": "kvali",
-  "displayName": "Kvali — AI Agent Progress & Tokens",
-  "description": "One progress bar for every AI coding agent: live task progress, current step, tokens, cost and plan limits for Claude Code, Codex, Gemini CLI, Antigravity and any agent that reads AGENTS.md.",
-  "version": "0.6.0",
+  "displayName": "Kvali — AI Agent Progress",
+  "description": "One progress bar for all your AI coding agents: plan progress, the current step, usage and alerts on your phone, grouped by project. Local and read-only.",
+  "version": "0.6.1",
   "publisher": "webgrandpa",
   "author": {
     "name": "Giorgi Khiladze",
@@ -31,16 +31,16 @@
     "Other"
   ],
   "keywords": [
-    "claude code",
-    "codex",
-    "gemini cli",
-    "antigravity",
-    "ai agent",
+    "ai",
+    "agents",
+    "coding agent",
     "progress",
-    "tokens",
-    "usage",
-    "cost",
-    "cursor"
+    "progress bar",
+    "tasks",
+    "plan",
+    "productivity",
+    "notifications",
+    "dashboard"
   ],
   "activationEvents": [
     "onStartupFinished"

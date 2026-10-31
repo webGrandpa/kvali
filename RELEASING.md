@@ -33,7 +33,7 @@ Each target is a separate job in [`.github/workflows/release.yml`](.github/workf
 ## Every release
 
 ```bash
-node scripts/set-version.mjs 0.6.1      # every package.json and the CLI's --version
+node scripts/set-version.mjs 0.6.1      # every package.json, the Claude Code plugin and the CLI's --version
 # add a CHANGELOG.md entry, then:
 git commit -am "Kvali 0.6.1" && git push
 git tag v0.6.1 && git push origin v0.6.1
