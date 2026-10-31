@@ -1,5 +1,6 @@
 import { copyFile, mkdir, rm } from 'node:fs/promises';
 import * as esbuild from 'esbuild';
+import { copyClaudePlugin } from '../../scripts/copy-claude-plugin.mjs';
 
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
@@ -46,6 +47,8 @@ const builds = [
 if (production) await rm('dist', { recursive: true, force: true });
 await mkdir('dist/webview', { recursive: true });
 await copyFile('webview/styles.css', 'dist/webview/main.css');
+// The Claude Code plugin ships inside the extension; Turn on installs it.
+await copyClaudePlugin('dist/claude-plugin');
 
 if (watch) {
   for (const b of builds) await (await esbuild.context(b)).watch();

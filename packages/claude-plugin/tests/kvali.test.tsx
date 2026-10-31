@@ -257,3 +257,44 @@ test('without a phone setup nothing is sent, and the heartbeat says so', async (
   expect(pushes).toHaveLength(0)
   expect(JSON.parse(writes.at(-1)!.text).push).toBe(false)
 })
+
+test('automatic planning: a prompt asks for a plan only while there is none, and can be turned off', async ($, on) => {
+  mock.clock(on, { now: T0 })
+  mock.env(on, { HOME: '/home/u' })
+  const files: Record<string, { text: string; mtimeMs: number }> = {}
+  engine(on, files)
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_, e) => {
+    seen.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+  let nextId = 1
+  on('tool.call', (_, e) => (e.tool === 'TaskCreate' ? { result: { task: { id: String(nextId++), subject: e.subject } } } : { result: {} }))
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+
+  await $.prompt.submit({ text: 'Add a checkout page' })
+  expect(seen.at(-1)?.at(-1)).toMatch(/^Progress tracking \(Kvali\): if this request takes more than two steps/)
+
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Build the form', description: 'x' })
+  await $.prompt.submit({ text: 'also add tests' })
+  expect(seen.at(-1)).toBeUndefined()
+
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  await $.prompt.submit({ text: 'next feature' })
+  expect(seen.at(-1)?.length).toBe(1)
+})
+
+test('automatic planning stays off when the config says so', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  mock.env(on, { HOME: '/home/u' })
+  engine(on, { '/home/u/.kvali/config.json': { text: JSON.stringify({ autoPlan: false }), mtimeMs: T0 } })
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_, e) => {
+    seen.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+  await clock.advance(61_000)
+  await $.prompt.submit({ text: 'Add a checkout page' })
+  expect(seen).toEqual([undefined])
+})

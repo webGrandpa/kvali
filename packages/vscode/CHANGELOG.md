@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 — 2026-10-31
+
+- **Turn on installs Kvali's Claude Code plugin** with Claude Code's own `claude plugin` command (found inside the Claude Code editor extension when there is no `claude` on PATH). No terminal step, and Kvali keeps the plugin updated: Claude Code reads it in place from `~/.kvali/claude-plugin`.
+- **One connection per agent**: with the plugin on, Kvali removes its Claude Code hooks; they remain only as the fallback for a Claude Code that cannot load plugins. Existing setups move over by themselves.
+- Automatic planning lives in the plugin (it follows `kvali.autoPlan`). Turn Off and uninstalling remove the plugin too.
+- The CLI ships the plugin as well: `kvali setup` installs it.
+
 ## 0.5.1 — 2026-10-31
 
 - Phone notifications are found at the top of the Agents view: "Get alerts on your phone" until they are set up, then "Phone alerts on · Show QR code". The card scrolls into view when it opens.

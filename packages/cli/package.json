@@ -1,6 +1,6 @@
 {
   "name": "@kvali/cli",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Terminal dashboard for AI coding agents: live task progress, tokens and cost for Claude Code, Codex, Gemini CLI, Antigravity and more.",
   "license": "MIT",
   "type": "module",
@@ -29,7 +29,7 @@
     "cli"
   ],
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/kvali.mjs --banner:js=\"#!/usr/bin/env node\" --log-level=warning",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/kvali.mjs --banner:js=\"#!/usr/bin/env node\" --log-level=warning && node ../../scripts/copy-claude-plugin.mjs dist/claude-plugin",
     "typecheck": "tsc -p ."
   },
   "devDependencies": {

@@ -22,6 +22,8 @@ export interface ViewState {
   scope: Scope;
   showCost: boolean;
   claudeHooks: HookStatus;
+  /** How Claude Code is connected: Kvali's plugin, its hooks (older Claude Code), or not at all. */
+  claudeMode: 'plugin' | 'hooks' | 'none';
   setup: SetupState;
   /** Agents found on this machine, e.g. ["Claude Code", "Antigravity"]. */
   detected: string[];

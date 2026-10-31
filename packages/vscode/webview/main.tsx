@@ -596,7 +596,7 @@ function App() {
   const groups = groupByProject(sessions, st.workspaceRoots, now);
   const today = todayUsage(sessions, now);
   const autoPlans = st.setup === 'on';
-  const needsRepair = st.setup === 'on' && st.detected.includes('Claude Code') && st.claudeHooks !== 'installed';
+  const needsRepair = st.setup === 'on' && st.detected.includes('Claude Code') && st.claudeMode === 'none';
 
   return (
     <main>
@@ -649,7 +649,7 @@ function App() {
       {needsRepair && (
         <aside class="tip">
           <p>
-            <b>Claude Code hooks need a refresh.</b> Without them "Needs you" alerts and automatic plans are off.
+            <b>Claude Code is not connected.</b> Without it "Needs you" alerts, the live pane and automatic plans are off.
           </p>
           <button class="btn" onClick={() => post({ type: 'runSetup' })}>
             Repair

@@ -413,3 +413,25 @@ export function ntfyBody(cfg: PhoneCfg, push: PhonePush): string {
 }
 
 export const baseName = (p: string): string => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
+
+/** Sent beside a prompt while the session has no unfinished plan: the same words as Kvali's hook. */
+export const PLAN_CONTEXT =
+  'Progress tracking (Kvali): if this request takes more than two steps, start by creating a task list with TaskCreate ' +
+  '(or TodoWrite), keep exactly one task in_progress, and mark each task completed as soon as it is done. ' +
+  'The user follows your progress from that list, so keep it current.'
+
+/** `autoPlan` in Kvali's config file; on unless set to false. */
+export function autoPlanEnabled(text: string | undefined): boolean {
+  if (!text) return true
+  try {
+    return (JSON.parse(text) as { autoPlan?: unknown })?.autoPlan !== false
+  } catch {
+    return true
+  }
+}
+
+/** Whether a prompt should carry the planning reminder. */
+export function wantsPlanContext(plan: KvPlan): boolean {
+  const p = progress(plan.tasks)
+  return !(p.total > 0 && p.done < p.total)
+}

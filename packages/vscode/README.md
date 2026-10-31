@@ -20,7 +20,7 @@ Everything is local and read-only. Kvali sends nothing anywhere unless you turn 
 
 | Agent | Progress | Tokens | Cost | Limits | Needs you |
 | --- | --- | --- | --- | --- | --- |
-| Claude Code | ✓ | ✓ | ✓ | — | ✓ with hooks |
+| Claude Code | ✓ | ✓ | ✓ | — | ✓ exact, with the plugin |
 | Codex | ✓ | ✓ | custom prices | ✓ | — |
 | Gemini CLI | ✓ | ✓ | custom prices | — | ✓ |
 | Antigravity | ✓ | — | — | — | ✓ |
@@ -29,6 +29,6 @@ Everything is local and read-only. Kvali sends nothing anywhere unless you turn 
 ## Getting started
 
 1. Open the **Kvali** view from the activity bar. Sessions from the last 24 hours appear automatically.
-2. Click **Turn on** once. Kvali enables "needs you" alerts and automatic plans for every agent it finds (Claude Code hooks, a short planning rule for Codex and Gemini/Antigravity). All of it is marked, reversible with **Kvali: Turn Off**, and removed automatically when you uninstall Kvali.
+2. Click **Turn on** once. Kvali enables "needs you" alerts and automatic plans for every agent it finds (Kvali's Claude Code plugin, installed with Claude Code's own command, and a short planning rule for Codex and Gemini/Antigravity). All of it is marked, reversible with **Kvali: Turn Off**, and removed automatically when you uninstall Kvali.
 
 Full documentation, the terminal dashboard and the source are on [GitHub](https://github.com/webGrandpa/kvali).

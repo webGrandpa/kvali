@@ -12,8 +12,11 @@ import {
   advance,
   applyPlanTool,
   baseName,
+  autoPlanEnabled,
   ntfyBody,
   parsePhoneConfig,
+  PLAN_CONTEXT,
+  wantsPlanContext,
   phonePush,
   barCells,
   contextPercent,
@@ -97,6 +100,8 @@ type Runtime = {
   pushedNeedsFor: number
   pushedStallFor: number
   lastStepPushAt: number
+  /** Ask Claude for a plan while there is none (`autoPlan` in ~/.kvali/config.json). */
+  autoPlan: boolean
 }
 
 const fresh = (): Runtime => ({
@@ -126,6 +131,7 @@ const fresh = (): Runtime => ({
   pushedNeedsFor: 0,
   pushedStallFor: 0,
   lastStepPushAt: 0,
+  autoPlan: true,
 })
 
 /**
@@ -279,11 +285,14 @@ async function catchUp($: Engine, config: string): Promise<void> {
 async function loadPhone($: Engine, now: number, force = false): Promise<void> {
   if (!rt.phoneFile || (!force && now - rt.phoneCheckedAt < 60_000)) return
   rt.phoneCheckedAt = now
+  let text: string | undefined
   try {
-    rt.phone = parsePhoneConfig(await $.fs.read(rt.phoneFile))
+    text = await $.fs.read(rt.phoneFile)
   } catch {
-    rt.phone = undefined
+    text = undefined
   }
+  rt.phone = text ? parsePhoneConfig(text) : undefined
+  rt.autoPlan = autoPlanEnabled(text)
 }
 
 const PUSH_EVENT: Record<PushKind, 'needs-you' | 'done' | 'error' | 'stuck' | 'steps'> = {
@@ -340,6 +349,15 @@ export const register: Register = on => {
     const what = p.total ? `${p.done}/${p.total} tasks done (${p.percent}%)${p.current ? `, now: ${p.current.title}` : ''}.` : 'no plan in this session yet.'
     return { text: `${where} ${what}` }
   })
+
+  // Automatic planning: while the session has no unfinished plan, a prompt asks Claude to keep one.
+  // The words are fixed and never contain anything from the prompt.
+  on('prompt.submit', async ($, e, next) => {
+    if (e.command || e.isMeta) return next(e)
+    await loadPhone($, await $.clock.now())
+    if (!rt.autoPlan || !wantsPlanContext(await read($, plan))) return next(e)
+    return next({ ...e, context: [...(e.context ?? []), PLAN_CONTEXT] })
+  }).catch(($, e, next) => next(e))
 
   on('turn.start', async ($, e, next) => {
     if (!e.agentId) {

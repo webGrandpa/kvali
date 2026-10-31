@@ -9,6 +9,7 @@ import {
   applySetup,
   claudeHookReply,
   claudeHooksStatus,
+  claudePluginEnabled,
   claudeSettingsPath,
   createDefaultAdapters,
   defaultLiveDir,
@@ -17,10 +18,12 @@ import {
   installClaudeHooks,
   newPhoneConfig,
   pathWithin,
+  pluginRunsIn,
   progressOf,
   pruneLiveDir,
   readPhoneConfig,
   removeSetup,
+  setKvaliOption,
   sendPush,
   setupChanges,
   testPush,
@@ -29,6 +32,7 @@ import {
   type AgentSession,
   type DetectedAgents,
   type HookStatus,
+  type SetupOptions,
   type Snapshot,
 } from '@kvali/core';
 import { readConfig, type KvaliConfig } from './config.ts';
@@ -55,6 +59,12 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
   const liveDir = defaultLiveDir(home);
   let config: KvaliConfig = readConfig();
   let claudeHooks: HookStatus = 'not-installed';
+  /** How Claude Code is connected: Kvali's plugin, Kvali's hooks (older Claude Code), or not at all. */
+  let claudeMode: 'plugin' | 'hooks' | 'none' = 'none';
+  const setupOptions = (): SetupOptions => ({
+    pluginDir: path.join(context.extensionPath, 'dist', 'claude-plugin'),
+    claudeExtensionDirs: vscode.extensions.all.filter((x) => x.id.toLowerCase() === 'anthropic.claude-code').map((x) => x.extensionPath),
+  });
   let detected: DetectedAgents = { claude: false, codex: false, gemini: false, antigravity: false };
   const setupState = (): SetupState => (context.globalState.get<string>(SETUP_KEY) as SetupState | undefined) ?? 'unset';
 
@@ -85,7 +95,7 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
     respond: (agent, ev) => {
       if (agent !== 'claude-code' || !config.autoPlan) return undefined;
       const session = engine.snapshot.sessions.find((s) => s.agent === 'claude-code' && s.id === ev.sessionId);
-      return claudeHookReply(ev, session);
+      return claudeHookReply(ev, session, pluginRunsIn(liveDir, ev.sessionId));
     },
     onEvent: (agent, ev) => {
       log.trace(`hook ${agent} ${ev.event}${ev.notificationType ? ` (${ev.notificationType})` : ''} ${ev.sessionId}`);
@@ -118,6 +128,7 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
       scope: config.scope,
       showCost: config.showCost,
       claudeHooks,
+      claudeMode,
       setup: setupState(),
       detected: detectedLabels(detected),
       setupChanges: setupChanges(detected),
@@ -175,18 +186,36 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
   }
 
   async function refreshHookStatus(): Promise<void> {
-    claudeHooks = await claudeHooksStatus(claudeSettingsPath(home), config.port).catch(() => 'not-installed' as const);
+    const settings = claudeSettingsPath(home, process.env);
+    claudeHooks = await claudeHooksStatus(settings, config.port).catch(() => 'not-installed' as const);
+    claudeMode = (await claudePluginEnabled(settings)) ? 'plugin' : claudeHooks === 'installed' ? 'hooks' : 'none';
     pushState();
   }
 
-  /** Turns everything on in one go: hooks for Claude Code, planning rules for Codex and Gemini/Antigravity. */
+  function onMessageText(): string {
+    const pane = claudeMode === 'plugin' ? " New Claude Code sessions show Kvali's live pane (type /reload-plugins in open ones)." : '';
+    return `Kvali is fully on. New agent sessions keep a plan.${pane} Undo anytime with "Kvali: Turn Off".`;
+  }
+
+  /** Mirrors settings the Claude Code plugin reads (it cannot see VS Code's) into ~/.kvali/config.json. */
+  async function shareSettings(): Promise<void> {
+    await setKvaliOption(home, 'autoPlan', config.autoPlan).catch((err: Error) => log.warn(`Could not save autoPlan: ${err.message}`));
+  }
+
+  /** Turns everything on in one go: the plugin for Claude Code (hooks where it has no plugins), planning rules for Codex and Gemini/Antigravity. */
   async function turnOn(): Promise<boolean> {
     detected = await detectAgents(home, process.env);
     try {
-      await applySetup(home, process.env, config.port, detected);
+      await shareSettings();
+      const r = await applySetup(home, process.env, config.port, detected, setupOptions());
       await context.globalState.update(SETUP_KEY, 'on');
       await refreshHookStatus();
       log.info(`Setup applied: ${setupChanges(detected).join('; ')}`);
+      if (r.claude === 'plugin') log.info("Claude Code: Kvali's plugin is on (new sessions; /reload-plugins in open ones)");
+      if (r.claude === 'hooks') {
+        log.info(`Claude Code: using Kvali's hooks${r.claudeNote ? ` (${r.claudeNote})` : ''}`);
+        if (r.claudeNote) void vscode.window.showInformationMessage(`Kvali connected Claude Code through hooks: ${r.claudeNote}. Alerts and plans work; the progress pane needs a Claude Code with plugins.`);
+      }
       return true;
     } catch (err) {
       void vscode.window.showErrorMessage(`Kvali setup failed: ${(err as Error).message}`);
@@ -203,9 +232,17 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
       return;
     }
     try {
-      if (detected.claude && claudeHooks !== 'installed') log.info('Updating Claude Code hooks to the current layout');
-      await applySetup(home, process.env, config.port, detected);
+      await shareSettings();
+      const before = claudeMode;
+      const r = await applySetup(home, process.env, config.port, detected, setupOptions());
+      if (r.claude === 'hooks' && r.claudeNote) log.info(`Claude Code: using Kvali's hooks (${r.claudeNote})`);
       await refreshHookStatus();
+      if (before === 'hooks' && claudeMode === 'plugin') {
+        log.info("Claude Code: moved from Kvali's hooks to Kvali's plugin");
+        void vscode.window.showInformationMessage(
+          "Kvali now connects Claude Code through its plugin: new Claude Code sessions show Kvali's live pane (type /reload-plugins in sessions already open).",
+        );
+      }
     } catch (err) {
       log.warn(`Could not refresh setup: ${(err as Error).message}`);
     }
@@ -221,7 +258,7 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
       'Not now',
     );
     if (choice === 'Turn on' && (await turnOn())) {
-      void vscode.window.showInformationMessage('Kvali is fully on. New agent sessions will keep a plan. Undo anytime with "Kvali: Turn Off".');
+      void vscode.window.showInformationMessage(onMessageText());
     } else if (choice === 'Not now') {
       await context.globalState.update(SETUP_KEY, 'off');
       pushState();
@@ -277,7 +314,7 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
         return;
       case 'runSetup':
         // Clicking "Turn on" on the setup card, which lists every change, is the consent.
-        if (await turnOn()) void vscode.window.showInformationMessage('Kvali is fully on. Undo anytime with "Kvali: Turn Off".');
+        if (await turnOn()) void vscode.window.showInformationMessage(onMessageText());
         return;
       case 'dismissSetup':
         await context.globalState.update(SETUP_KEY, 'off');
@@ -361,11 +398,11 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
         },
         'Turn on',
       );
-      if (ok === 'Turn on' && (await turnOn())) void vscode.window.showInformationMessage('Kvali is fully on.');
+      if (ok === 'Turn on' && (await turnOn())) void vscode.window.showInformationMessage(onMessageText());
     }),
 
     vscode.commands.registerCommand('kvali.turnOff', async () => {
-      await removeSetup(home, process.env);
+      await removeSetup(home, process.env, { claudeExtensionDirs: setupOptions().claudeExtensionDirs });
       await context.globalState.update(SETUP_KEY, 'off');
       await refreshHookStatus();
       void vscode.window.showInformationMessage('Kvali removed its hooks and planning rules. Tracking from agent files keeps working.');
@@ -436,6 +473,7 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
       if (!e.affectsConfiguration('kvali')) return;
       const before = config;
       config = readConfig();
+      if (before.autoPlan !== config.autoPlan) void shareSettings();
       engine.configure({
         activeWindowMs: config.activeWindowHours * 3_600_000,
         staleAfterMs: config.staleAfterMinutes * 60_000,

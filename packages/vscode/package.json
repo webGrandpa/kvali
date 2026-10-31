@@ -2,7 +2,7 @@
   "name": "kvali",
   "displayName": "Kvali — AI Agent Progress & Tokens",
   "description": "One progress bar for every AI coding agent: live task progress, current step, tokens, cost and plan limits for Claude Code, Codex, Gemini CLI, Antigravity and any agent that reads AGENTS.md.",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "publisher": "webgrandpa",
   "author": {
     "name": "Giorgi Khiladze",
@@ -305,7 +305,7 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc -p . && tsc -p webview",
-    "package": "node esbuild.mjs --production && vsce package --no-dependencies --out kvali-0.5.1.vsix",
+    "package": "node esbuild.mjs --production && vsce package --no-dependencies --out kvali-0.6.0.vsix",
     "vscode:uninstall": "node ./dist/uninstall.js"
   },
   "devDependencies": {

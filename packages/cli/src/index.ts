@@ -13,6 +13,7 @@ import { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 import {
   AntigravityAdapter,
   ClaudeCodeAdapter,
@@ -50,6 +51,7 @@ import {
   testPush,
   writePhoneConfig,
   pathWithin,
+  pluginRunsIn,
   progressOf,
   sessionTokens,
   todayUsage,
@@ -59,7 +61,7 @@ import {
   type Snapshot,
 } from '@kvali/core';
 
-const VERSION = '0.5.1';
+const VERSION = '0.6.0';
 
 interface Options {
   json: boolean;
@@ -460,14 +462,19 @@ async function main(): Promise<void> {
   if (cmd[0] === 'setup') {
     if (cmd[1] === 'off') {
       await removeSetup(opts.home, process.env);
-      console.log('Removed Kvali hooks and planning rules.');
+      console.log("Removed Kvali's Claude Code plugin, hooks and planning rules.");
       return;
     }
     const d = await detectAgents(opts.home, process.env);
     const changes = setupChanges(d);
     if (!changes.length) fail('no supported agent found (~/.claude, ~/.codex, ~/.gemini)');
-    await applySetup(opts.home, process.env, opts.port, d);
-    console.log(['Kvali is on:', ...changes.map((c) => `  • ${c}`), 'Undo with `kvali setup off`.'].join('\n'));
+    // The Claude Code plugin ships next to this file (dist/claude-plugin).
+    const pluginDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'claude-plugin');
+    const r = await applySetup(opts.home, process.env, opts.port, d, { pluginDir });
+    const lines = changes.map((c) => `  • ${c}`);
+    if (r.claude === 'plugin') lines.push('  Claude Code: new sessions show the Kvali pane; type /reload-plugins in sessions already open.');
+    if (r.claude === 'hooks') lines.push(`  Claude Code: connected through hooks instead${r.claudeNote ? ` (${r.claudeNote})` : ''}.`);
+    console.log(['Kvali is on:', ...lines, 'Undo with `kvali setup off`.'].join('\n'));
     return;
   }
   if (cmd[0] === 'phone') return phone(cmd[1], opts);
@@ -501,7 +508,9 @@ async function main(): Promise<void> {
         port: opts.port,
         liveDir: defaultLiveDir(opts.home),
         respond: (agent, ev) =>
-          agent === 'claude-code' ? claudeHookReply(ev, engine.snapshot.sessions.find((x) => x.agent === 'claude-code' && x.id === ev.sessionId)) : undefined,
+          agent === 'claude-code'
+          ? claudeHookReply(ev, engine.snapshot.sessions.find((x) => x.agent === 'claude-code' && x.id === ev.sessionId), pluginRunsIn(defaultLiveDir(opts.home), ev.sessionId))
+          : undefined,
       })
     : undefined;
   hub?.start();
@@ -546,7 +555,9 @@ async function watch(opts: Options): Promise<void> {
     port: opts.port,
     liveDir: defaultLiveDir(opts.home),
     respond: (agent, ev) =>
-      agent === 'claude-code' ? claudeHookReply(ev, engine.snapshot.sessions.find((x) => x.agent === 'claude-code' && x.id === ev.sessionId)) : undefined,
+      agent === 'claude-code'
+          ? claudeHookReply(ev, engine.snapshot.sessions.find((x) => x.agent === 'claude-code' && x.id === ev.sessionId), pluginRunsIn(defaultLiveDir(opts.home), ev.sessionId))
+          : undefined,
     onRoleChange: (isHub) => say(isHub ? `listening for agent hooks on 127.0.0.1:${opts.port}` : 'another Kvali (an editor window?) holds the hook port and sends the notifications'),
   });
   const say = (line: string) => console.log(`${new Date().toLocaleTimeString()} ${line}`);

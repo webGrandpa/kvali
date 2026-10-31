@@ -3,6 +3,7 @@
 !dist/uninstall.js
 !dist/webview/main.js
 !dist/webview/main.css
+!dist/claude-plugin/**
 !media/icon.png
 !media/activity.svg
 !package.json

@@ -21,12 +21,9 @@ The plugin also writes a small heartbeat file per session to `~/.kvali/live/clau
 
 ## Install
 
-From the Kvali repository on your computer:
-
-```bash
-claude plugin marketplace add /path/to/kvali
-claude plugin install kvali@kvali
-```
+- **With Kvali's editor extension** (VS Code, Antigravity, Cursor, Windsurf): click **Turn on** in the Kvali view. Kvali installs this plugin with Claude Code's own command and keeps it updated.
+- **With Kvali's CLI**: `npx kvali setup`.
+- **On its own**, at the prompt of a terminal Claude Code session: `/plugin install kvali --marketplace webGrandpa/kvali` (from a shell: `claude plugin install kvali --marketplace webGrandpa/kvali`). In the desktop app: click + next to the prompt box, then Plugins, Add marketplace with `webGrandpa/kvali`, then Add plugin.
 
 Then start a new Claude Code session (or run `/reload-plugins`).
 

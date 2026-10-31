@@ -72,6 +72,22 @@ export async function writePhoneConfig(home: string, cfg: PhoneConfig | undefine
   await fsp.chmod(file, 0o600).catch(() => undefined);
 }
 
+/** Sets one top-level option in ~/.kvali/config.json (read by the CLI and the Claude Code plugin), keeping the rest. */
+export async function setKvaliOption(home: string, key: 'autoPlan', value: boolean): Promise<void> {
+  const file = kvaliConfigFile(home);
+  let all: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(await fsp.readFile(file, 'utf8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) all = parsed;
+  } catch {
+    // new file
+  }
+  if (all[key] === value) return;
+  all[key] = value;
+  await fsp.mkdir(path.dirname(file), { recursive: true });
+  await fsp.writeFile(file, `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600 });
+}
+
 /** A topic nobody can guess (80 random bits): on ntfy.sh anyone who knows a topic's name can read it. */
 export function newTopic(): string {
   const alphabet = 'abcdefghijkmnpqrstuvwxyz23456789'; // 32 letters: no bias, no 0/o or 1/l

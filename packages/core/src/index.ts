@@ -35,8 +35,9 @@ export {
   removeGlobalPlanRule,
 } from './protocol.ts';
 export type { InstructionTarget } from './protocol.ts';
-export { CLAUDE_PLAN_CONTEXT, claudeHookReply } from './hooks/replies.ts';
+export { CLAUDE_PLAN_CONTEXT, claudeHookReply, pluginRunsIn } from './hooks/replies.ts';
 export { applySetup, detectAgents, detectedLabels, removeSetup, setupChanges } from './setup.ts';
-export type { DetectedAgents } from './setup.ts';
+export type { DetectedAgents, SetupOptions, SetupResult } from './setup.ts';
 export * from './phone.ts';
 export * from './qr.ts';
+export * from './hooks/claude-plugin.ts';
