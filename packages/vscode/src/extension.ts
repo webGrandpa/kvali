@@ -15,12 +15,17 @@ import {
   detectAgents,
   detectedLabels,
   installClaudeHooks,
+  newPhoneConfig,
   pathWithin,
   progressOf,
   pruneLiveDir,
+  readPhoneConfig,
   removeSetup,
+  sendPush,
   setupChanges,
+  testPush,
   uninstallClaudeHooks,
+  writePhoneConfig,
   type AgentSession,
   type DetectedAgents,
   type HookStatus,
@@ -30,6 +35,7 @@ import { readConfig, type KvaliConfig } from './config.ts';
 import type { FromWebview, SetupState } from './messages.ts';
 import { Notifier } from './notifier.ts';
 import { AgentsView } from './panel.ts';
+import { PhoneSender } from './phone.ts';
 import { StatusBar } from './statusbar.ts';
 import { WindowRegistry } from './windows.ts';
 
@@ -92,6 +98,9 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
     },
   });
 
+  const phone = new PhoneSender(home, () => hub.isHub, log);
+  let phoneCard = false;
+
   const view = new AgentsView(context.extensionUri, (m) => void onMessage(m));
   const statusBar = new StatusBar();
   const notifier = new Notifier({
@@ -115,6 +124,8 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
       isHub: hub.isHub,
       activeWindowHours: config.activeWindowHours,
       home,
+      phone: phone.view(),
+      phoneCard,
     });
   }
 
@@ -125,8 +136,43 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
   engine.onSnapshot((snap) => {
     refreshStatusBar();
     notifier.update(snap);
+    const hadPhone = !!phone.config;
+    void phone.update(snap).then(() => {
+      if (!!phone.config !== hadPhone) pushState();
+    });
     pushState();
   });
+
+  /** One step to the phone: a private topic, the QR code in the panel, a test notification. */
+  async function phoneSetup(): Promise<void> {
+    let cfg = await readPhoneConfig(home);
+    if (!cfg) {
+      cfg = newPhoneConfig();
+      await writePhoneConfig(home, cfg);
+      log.info(`Phone notifications set up on ${cfg.server} (topic ${cfg.topic})`);
+    }
+    await phone.reload(true);
+    phoneCard = true;
+    pushState();
+    await vscode.commands.executeCommand('kvali.show');
+    await phoneTest(true);
+  }
+
+  async function phoneTest(quietOnSuccess = false): Promise<void> {
+    await phone.reload(true);
+    const cfg = phone.config;
+    if (!cfg) {
+      void vscode.window.showInformationMessage('Phone notifications are not set up yet.', 'Set up').then((c) => c && phoneSetup());
+      return;
+    }
+    const r = await sendPush(cfg, testPush());
+    if (r.ok) {
+      if (!quietOnSuccess) void vscode.window.showInformationMessage('Kvali sent a test notification to your phone.');
+    } else {
+      log.warn(`Phone test failed: ${r.error}`);
+      void vscode.window.showWarningMessage(`Kvali could not send to your phone: ${r.error}. Check the network (a VPN, proxy or firewall may block ${new URL(cfg.server).host}).`);
+    }
+  }
 
   async function refreshHookStatus(): Promise<void> {
     claudeHooks = await claudeHooksStatus(claudeSettingsPath(home), config.port).catch(() => 'not-installed' as const);
@@ -256,6 +302,16 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
       case 'command':
         await vscode.commands.executeCommand(m.command);
         return;
+      case 'copy':
+        if (typeof m.text === 'string' && m.text.length < 500) {
+          await vscode.env.clipboard.writeText(m.text);
+          void vscode.window.setStatusBarMessage('Kvali: copied', 2_000);
+        }
+        return;
+      case 'hidePhoneCard':
+        phoneCard = false;
+        pushState();
+        return;
       default:
         return;
     }
@@ -276,6 +332,15 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
       vscode.workspace.getConfiguration('kvali').update('scope', config.scope === 'all' ? 'workspace' : 'all', vscode.ConfigurationTarget.Global),
     ),
     vscode.commands.registerCommand('kvali.reportProblem', () => reportProblem()),
+    vscode.commands.registerCommand('kvali.phoneSetup', () => phoneSetup()),
+    vscode.commands.registerCommand('kvali.phoneTest', () => phoneTest()),
+    vscode.commands.registerCommand('kvali.phoneOff', async () => {
+      await writePhoneConfig(home, undefined);
+      await phone.reload(true);
+      phoneCard = false;
+      pushState();
+      void vscode.window.showInformationMessage('Phone notifications are off. You can remove the Kvali topic from the ntfy app too.');
+    }),
 
     vscode.commands.registerCommand('kvali.setup', async () => {
       detected = await detectAgents(home, process.env);

@@ -9,11 +9,12 @@
 - **Progress to 100%** from the agent's own plan (Claude Code Tasks, Codex `update_plan`, Gemini `write_todos`, Antigravity `task.md`, or the [progress protocol](https://github.com/webGrandpa/kvali/blob/main/docs/PROTOCOL.md)).
 - **What it is doing right now**: the step, the tool or command, and for how long.
 - **Needs you**: permission prompts and questions in the status bar and as notifications, including OS notifications when the editor is in the background.
+- **On your phone**: run **Kvali: Send Notifications to My Phone**, scan the QR code with the free ntfy app, and get a push when an agent needs you, finishes a long task, fails or goes quiet.
 - **Tokens and API value** per session, project and day, with context-window usage. Anthropic prices are built in; set `kvali.pricing` for other models.
 - **Plan limits**: 5-hour and weekly usage for Codex subscriptions.
 - **All projects in one place**, this workspace first. **Resume** a finished Claude Code or Codex session in a terminal with one click.
 
-Everything is local and read-only. Kvali never sends your data anywhere.
+Everything is local and read-only. Kvali sends nothing anywhere unless you turn on phone notifications, and then only short status lines (agent, project, step, progress), never code or prompts.
 
 ## Supported agents
 

@@ -17,13 +17,14 @@ Long agent runs are a black box. You either babysit the chat or keep asking for 
 
 - **Progress to 100%**: the agent's own plan (Claude Code Tasks, Codex `update_plan`, Gemini `write_todos`, Antigravity `task.md`) as a progress bar with the step it is on.
 - **What it is doing right now**: "Running `pnpm test` · 41s", "Editing `src/app.tsx`", the last few actions, and how long the current step is taking compared with the earlier ones ("4m of ~6m").
-- **Stuck or working?** Each working agent shows whether it is active, waiting for a long command, retrying after a connection/API error, or silent with nothing running.
+- **Stuck or working?** Each working agent shows whether it is active, waiting for a long command, retrying after a connection/API error, or silent with nothing running. With the [Claude Code plugin](#claude-code-plugin) this is exact for Claude Code: thinking, writing, running a tool, waiting for you, no data from the API, or closed.
 - **Needs you**: permission prompts and questions surface in the status bar and as notifications, including OS notifications when the editor is in the background.
+- **On your phone**: the same alerts as push notifications through the free [ntfy](https://ntfy.sh) app (iPhone and Android), for every agent. See [Phone notifications](#phone-notifications).
 - **Tokens and API value**: per session, per project and per day, with input, output, cache and context usage. API value is what the tokens would cost at list prices (built in for Anthropic models, configurable for others); subscriptions are not billed per token.
 - **Plan limits**: 5-hour and weekly usage for Codex subscriptions, straight from Codex's own logs.
 - **Every project at once**: sessions are grouped by project; the current workspace comes first.
 
-Everything is local and read-only. Kvali never sends your data anywhere.
+Everything is local and read-only. Kvali sends nothing anywhere unless you turn on phone notifications, and then only short status lines (agent, project, step, progress), never code or prompts.
 
 ## Supported agents
 
@@ -39,12 +40,37 @@ Everything is local and read-only. Kvali never sends your data anywhere.
 
 Want another agent? Adapters are small; see [docs/ADAPTERS.md](docs/ADAPTERS.md).
 
+## Claude Code plugin
+
+Use Claude Code without an editor (terminal, desktop app), or want exact liveness? Kvali also ships as a Claude Code plugin ([packages/claude-plugin](packages/claude-plugin)): a pane beside the chat with the plan's progress bar, the current step and its time, what Claude is doing right now and the session's tokens, plus a status line entry. It reads Claude Code's own events (the model's stream, tool calls, permission prompts), so it never has to guess whether the agent is thinking or stuck.
+
+```bash
+claude plugin marketplace add /path/to/kvali
+claude plugin install kvali@kvali
+```
+
+With the editor extension installed too, the plugin's heartbeat (`~/.kvali/live/claude-code/<session>.mod.json`) makes the sidebar exact for every Claude Code session, and a Claude Code that was closed or froze mid-task is reported within 30 seconds.
+
+## Phone notifications
+
+Get a push on your phone when an agent needs you, finishes a long task (two minutes or more), fails, or goes quiet, for every agent Kvali sees.
+
+1. In VS Code run **Kvali: Send Notifications to My Phone** (or `kvali phone` in a terminal). Kvali makes a private topic and shows a QR code.
+2. Install the free **ntfy** app. On Android scan the code; on an iPhone tap **+** in ntfy and enter the topic.
+3. A test notification arrives. That's it.
+
+- **Who sends**: the editor window that holds the hook port (one per machine, so each event arrives once), `kvali` or `kvali watch` (no dashboard, for terminal-only setups). Kvali's Claude Code plugin sends for its own sessions by itself, with exact "needs you" and "no data from the API" alerts.
+- **What a push says**: the agent, the project, the step and progress, for example "Claude Code needs you · storefront / Needs approval: Bash / 3/7 tasks · Writing tests". Never code or prompts. `kvali phone --private` leaves out project and step names too.
+- **Privacy**: on ntfy.sh anyone who knows a topic's name can read it, so Kvali generates an unguessable one (80 random bits). Keep it to yourself, or use your own ntfy server: `kvali phone --server https://ntfy.example.com --token tk_…`.
+- **More or fewer**: `kvali phone --steps` adds a push for each finished step. The setup is `~/.kvali/config.json` (`phone.events`: `needs-you`, `done`, `error`, `stuck`, `steps`). **Kvali: Stop Phone Notifications** or `kvali phone off` turns it off.
+- Using Claude Code with a Pro or Max plan? Claude's own [Remote Control](https://code.claude.com/docs/en/remote-control) also shows a session in the Claude app with push notifications; Kvali adds every other agent and one view of all of them.
+
 ## Install
 
 **Editor extension** (VS Code ≥ 1.90, Antigravity, Cursor, Windsurf, VSCodium):
 
 - From a release: download `kvali-x.y.z.vsix`, then run **Extensions: Install from VSIX…** from the Command Palette (or `code --install-extension kvali-x.y.z.vsix`).
-- From source: `pnpm install && pnpm package`, which writes `packages/vscode/kvali-0.3.0.vsix`.
+- From source: `pnpm install && pnpm package`, which writes `packages/vscode/kvali-0.5.0.vsix`.
 
 Open the **Kvali** icon in the activity bar and click **Turn on** once. That is the whole setup: Kvali finds the agents on your machine, turns on "needs you" alerts and makes every agent keep a plan, so each task gets a real progress bar. Sessions from the last 24 hours appear automatically.
 

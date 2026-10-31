@@ -6,3 +6,6 @@ out/
 .DS_Store
 coverage/
 .vscode-test/
+
+# Written by Claude Code when it loads the plugin from this folder
+packages/claude-plugin/.claude-plugin/types/

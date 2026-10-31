@@ -1,0 +1,14 @@
+{
+  "name": "kvali",
+  "description": "Kvali: live progress, current step and exact liveness for AI coding agents.",
+  "owner": {
+    "name": "Giorgi Khiladze"
+  },
+  "plugins": [
+    {
+      "name": "kvali",
+      "source": "./packages/claude-plugin",
+      "description": "Live progress for Claude Code: plan progress, the current step and its time, what the agent is doing right now, and tokens."
+    }
+  ]
+}

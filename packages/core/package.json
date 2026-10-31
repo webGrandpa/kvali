@@ -1,6 +1,6 @@
 {
   "name": "@kvali/core",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "private": true,
   "description": "Editor-agnostic engine that reads local AI coding agent sessions (Claude Code, Codex, Gemini CLI, Antigravity, progress files) and normalizes progress, tokens and cost.",
   "license": "MIT",
@@ -12,5 +12,8 @@
   "scripts": {
     "typecheck": "tsc -p .",
     "test": "node --test --test-reporter=spec test/*.test.ts"
+  },
+  "dependencies": {
+    "qrcode-generator": "2.0.4"
   }
 }

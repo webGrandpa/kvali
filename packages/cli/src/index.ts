@@ -6,7 +6,10 @@
  *   kvali --json               print one snapshot as JSON
  *   kvali hooks install|uninstall|status    manage Claude Code hooks
  *   kvali protocol [dir]       add the progress protocol to <dir>/AGENTS.md
+ *   kvali phone                notifications on your phone (ntfy)
+ *   kvali watch                no dashboard: hooks and phone notifications only
  */
+import { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -37,16 +40,26 @@ import {
   fmtUsd,
   groupByProject,
   installClaudeHooks,
+  kvaliConfigFile,
+  newPhoneConfig,
+  PushPlanner,
+  qrTerminal,
+  readPhoneConfig,
+  sendPush,
+  subscribeLink,
+  testPush,
+  writePhoneConfig,
   pathWithin,
   progressOf,
   sessionTokens,
   todayUsage,
   uninstallClaudeHooks,
   type AgentSession,
+  type PhoneConfig,
   type Snapshot,
 } from '@kvali/core';
 
-const VERSION = '0.3.0';
+const VERSION = '0.5.0';
 
 interface Options {
   json: boolean;
@@ -58,6 +71,10 @@ interface Options {
   hub: boolean;
   port: number;
   color: boolean;
+  server?: string;
+  token?: string;
+  private: boolean;
+  steps: boolean;
 }
 
 function parse(argv: string[]): { cmd: string[]; opts: Options } {
@@ -70,6 +87,8 @@ function parse(argv: string[]): { cmd: string[]; opts: Options } {
     hub: true,
     port: DEFAULT_HOOK_PORT,
     color: process.stdout.isTTY && !process.env.NO_COLOR,
+    private: false,
+    steps: false,
   };
   const cmd: string[] = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -111,6 +130,19 @@ function parse(argv: string[]): { cmd: string[]; opts: Options } {
       case '--no-color':
         opts.color = false;
         break;
+      case '--server':
+        opts.server = next();
+        if (!/^https?:\/\/[^\s/]/.test(opts.server)) fail('--server needs an http(s) URL');
+        break;
+      case '--token':
+        opts.token = next();
+        break;
+      case '--private':
+        opts.private = true;
+        break;
+      case '--steps':
+        opts.steps = true;
+        break;
       case '--version':
       case '-v':
         console.log(VERSION);
@@ -142,6 +174,9 @@ Usage
   kvali hooks status
   kvali protocol [dir]        add the progress protocol to <dir>/AGENTS.md
   kvali plan-rule             ask every installed agent to always keep a plan (global)
+  kvali phone                 notifications on your phone through ntfy: shows a QR code, sends a test
+  kvali phone test | off      send a test notification | stop phone notifications
+  kvali watch                 run without a dashboard: hooks and phone notifications (e.g. in the background)
 
 Options
   -p, --project <dir>         only sessions inside <dir>      --here   same, for the current directory
@@ -149,8 +184,9 @@ Options
   --brain-dir <dir>           extra Antigravity brain directory (repeatable)
   --home <dir>                read agent data from another home directory
   --port <n>                  hook hub port (default ${DEFAULT_HOOK_PORT})
-  --no-hub                    do not listen for hook events
-  --no-color`;
+  --no-hub                    do not listen for hook events (and send no phone notifications)
+  --no-color
+  kvali phone options: --server <url> (self-hosted ntfy)  --token <token>  --private (no project or step names)  --steps (also each finished step)`;
 
 function fail(msg: string): never {
   console.error(`kvali: ${msg}`);
@@ -293,7 +329,7 @@ export function render(snap: Snapshot, opts: Options, width = process.stdout.col
       const tok = sessionTokens(s);
       if (tok !== undefined) meta.push(`${fmtTokens(tok)} tok`);
       if (s.costUsd !== undefined) meta.push(`API value ${fmtUsd(s.costUsd)}`);
-      if (s.context?.window) meta.push(`ctx ${Math.round((s.context.used / s.context.window) * 100)}%`);
+      if (s.context?.window) meta.push(`context ${Math.round((s.context.used / s.context.window) * 100)}%`);
       if (s.activeSubagents) meta.push(`${s.activeSubagents} subagent${s.activeSubagents > 1 ? 's' : ''}`);
       const metaStr = c.gray(meta.join(' · '));
       const indent = '            ';
@@ -337,6 +373,87 @@ async function hooks(sub: string | undefined, opts: Options): Promise<void> {
   } else fail(`unknown hooks command "${sub}"`);
 }
 
+/**
+ * Sends phone notifications while this process holds the hook port, so that with an editor
+ * open too each event still reaches the phone once.
+ */
+function startPhone(engine: Engine, hub: HookHub | undefined, home: string, report: (line: string) => void): void {
+  const planner = new PushPlanner();
+  let cfg: PhoneConfig | undefined;
+  let mtime = -1;
+  let checked = 0;
+  engine.onSnapshot((snap) => {
+    void (async () => {
+      const now = Date.now();
+      if (now - checked >= 5_000) {
+        checked = now;
+        const m = (await fsp.stat(kvaliConfigFile(home)).catch(() => undefined))?.mtimeMs ?? 0;
+        if (m !== mtime) {
+          mtime = m;
+          cfg = await readPhoneConfig(home);
+        }
+      }
+      if (!cfg) return;
+      const pushes = planner.observe(snap, cfg);
+      if (!pushes.length || !hub?.isHub) return;
+      for (const p of pushes) {
+        const r = await sendPush(cfg, p);
+        report(r.ok ? `phone ← ${p.title}` : `phone: not sent (${r.error})`);
+      }
+    })();
+  });
+}
+
+async function phone(sub: string | undefined, opts: Options): Promise<void> {
+  const c = paint(opts.color);
+  if (sub === 'off') {
+    await writePhoneConfig(opts.home, undefined);
+    console.log('Phone notifications are off. You can remove the Kvali topic from the ntfy app too.');
+    return;
+  }
+  let cfg = await readPhoneConfig(opts.home);
+  if (sub === 'test') {
+    if (!cfg) fail('phone notifications are not set up; run `kvali phone`');
+    const r = await sendPush(cfg, testPush());
+    console.log(r.ok ? 'Sent a test notification.' : `Could not send: ${r.error}`);
+    if (!r.ok) process.exitCode = 1;
+    return;
+  }
+  if (sub) fail(`unknown phone command "${sub}" (phone, phone test, phone off)`);
+  const fresh = !cfg;
+  cfg ??= newPhoneConfig(opts.server);
+  if (opts.server) cfg.server = opts.server.replace(/\/+$/, '');
+  if (opts.token) cfg.token = opts.token;
+  if (opts.private) cfg.details = false;
+  if (opts.steps && !cfg.events.includes('steps')) cfg.events.push('steps');
+  await writePhoneConfig(opts.home, cfg);
+  const self = cfg.server !== 'https://ntfy.sh';
+  console.log(
+    [
+      c.bold('Kvali → your phone'),
+      '',
+      '  1. Install the free ntfy app (iPhone or Android): https://ntfy.sh',
+      `  2. Android: scan this code. iPhone: in ntfy tap + and enter the topic${self ? ` (server ${cfg.server})` : ''}.`,
+      '',
+      qrTerminal(subscribeLink(cfg), opts.color),
+      '',
+      `  Topic: ${c.bold(cfg.topic)}${fresh ? c.gray('  (new; keep it to yourself: the name is the key)') : ''}`,
+      '',
+    ].join('\n'),
+  );
+  const r = await sendPush(cfg, testPush());
+  console.log(r.ok ? c.green('  Sent a test notification.') : c.yellow(`  Could not send a test notification: ${r.error}`));
+  console.log(
+    [
+      '',
+      '  You get a notification when an agent needs you, finishes a long task, fails or goes quiet.',
+      '  They are sent while Kvali runs: the editor extension, `kvali`, or `kvali watch` in the background.',
+      "  Kvali's Claude Code plugin sends them for its own sessions by itself.",
+      `  ${c.gray('Test: kvali phone test · Stop: kvali phone off')}`,
+    ].join('\n'),
+  );
+}
+
 async function main(): Promise<void> {
   const { cmd, opts } = parse(process.argv.slice(2));
   if (cmd[0] === 'hooks') return hooks(cmd[1], opts);
@@ -353,6 +470,8 @@ async function main(): Promise<void> {
     console.log(['Kvali is on:', ...changes.map((c) => `  • ${c}`), 'Undo with `kvali setup off`.'].join('\n'));
     return;
   }
+  if (cmd[0] === 'phone') return phone(cmd[1], opts);
+  if (cmd[0] === 'watch') return watch(opts);
   if (cmd[0] === 'plan-rule') {
     for (const r of await addGlobalPlanRule(opts.home, process.env)) console.log(`${r.agent}: ${r.result} (${r.file})`);
     return;
@@ -386,6 +505,10 @@ async function main(): Promise<void> {
       })
     : undefined;
   hub?.start();
+  let phoneLine = '';
+  startPhone(engine, hub, opts.home, (line) => {
+    phoneLine = `${new Date().toLocaleTimeString()} ${line}`;
+  });
   const out = process.stdout;
   out.write(`${ESC}?1049h${ESC}?25l`);
   const restore = () => {
@@ -393,7 +516,8 @@ async function main(): Promise<void> {
     hub?.dispose();
     engine.dispose();
   };
-  const draw = (snap: Snapshot) => out.write(`${ESC}H${ESC}2J${render(snap, opts)}\n${paint(opts.color).gray('\nq to quit')}`);
+  const draw = (snap: Snapshot) =>
+    out.write(`${ESC}H${ESC}2J${render(snap, opts)}\n${paint(opts.color).gray(`\n${phoneLine ? `${phoneLine}\n` : ''}q to quit`)}`);
   engine.onSnapshot(draw);
   engine.start();
   const clock = setInterval(() => draw(engine.snapshot), 1_000);
@@ -413,6 +537,31 @@ async function main(): Promise<void> {
       if (k === 'q' || k === '\u0003') quit();
     });
   }
+}
+
+/** No dashboard: receives agent hooks and sends phone notifications until stopped. */
+async function watch(opts: Options): Promise<void> {
+  const engine = makeEngine(opts);
+  const hub = new HookHub({
+    port: opts.port,
+    liveDir: defaultLiveDir(opts.home),
+    respond: (agent, ev) =>
+      agent === 'claude-code' ? claudeHookReply(ev, engine.snapshot.sessions.find((x) => x.agent === 'claude-code' && x.id === ev.sessionId)) : undefined,
+    onRoleChange: (isHub) => say(isHub ? `listening for agent hooks on 127.0.0.1:${opts.port}` : 'another Kvali (an editor window?) holds the hook port and sends the notifications'),
+  });
+  const say = (line: string) => console.log(`${new Date().toLocaleTimeString()} ${line}`);
+  hub.start();
+  startPhone(engine, hub, opts.home, say);
+  engine.start();
+  const cfg = await readPhoneConfig(opts.home);
+  say(cfg ? `watching agents; phone notifications go to ${cfg.topic}` : 'watching agents; phone notifications are not set up (run `kvali phone`)');
+  const stop = () => {
+    hub.dispose();
+    engine.dispose();
+    process.exit(0);
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
 }
 
 main().catch((err) => fail(err instanceof Error ? err.message : String(err)));

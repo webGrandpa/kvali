@@ -16,7 +16,7 @@
 import path from 'node:path';
 import type { Adapter, AdapterContext } from '../adapter.ts';
 import { staleness } from '../adapter.ts';
-import type { Activity, AgentSession, DailyUsage, TaskItem, TaskStatus, TokenUsage } from '../model.ts';
+import type { Activity, AgentSession, DailyUsage, PulsePhase, TaskItem, TaskStatus, TokenUsage } from '../model.ts';
 import { addTokens, emptyTokens, progressOf } from '../model.ts';
 import { findGitRoot, listDir, readJsonSafe, statSafe } from '../util/fs.ts';
 import { JsonlTail } from '../util/jsonl.ts';
@@ -75,12 +75,31 @@ interface ClaudeState {
   turnSteps: number;
   turnStartedAt?: number;
   live?: LiveState & { mtimeMs: number };
+  /** The heartbeat Kvali's Claude Code plugin writes from inside the session. */
+  pulse?: PulseFile & { mtimeMs: number };
   subagents: Map<string, { tail: JsonlTail; updatedAt: number }>;
   timer: TaskTimer;
   recent: Activity[];
   trouble?: { message: string; at: number; attempt?: number; maxAttempts?: number };
   lastSubagentScan: number;
 }
+
+/** What Kvali's Claude Code plugin writes to `~/.kvali/live/claude-code/<session>.mod.json`. */
+interface PulseFile {
+  v: number;
+  at: number;
+  phase: string;
+  since: number;
+  label?: string;
+  detail?: string;
+  lastDataAt?: number;
+  /** The plugin sends this session's phone notifications. */
+  push?: boolean;
+}
+
+/** The plugin rewrites its heartbeat at least every 10 s while a turn runs. */
+const PULSE_FRESH_MS = 30_000;
+const PULSE_ACTIVE = new Set<PulsePhase>(['requesting', 'thinking', 'writing', 'tool-input', 'running', 'needs-you', 'stalled']);
 
 const WAITING_NOTIFICATIONS = new Set([
   'permission_prompt',
@@ -555,6 +574,15 @@ export class ClaudeCodeAdapter implements Adapter {
       st.live = live ? { ...live, mtimeMs: lst.mtimeMs } : undefined;
     }
 
+    // Heartbeat from Kvali's Claude Code plugin (optional): exact liveness from inside the session.
+    const pulseFile = path.join(ctx.liveDir, 'claude-code', `${st.sessionId}.mod.json`);
+    const pst = await statSafe(pulseFile);
+    if (!pst) st.pulse = undefined;
+    else if (pst.mtimeMs !== st.pulse?.mtimeMs) {
+      const pulse = await readJsonSafe<PulseFile>(pulseFile);
+      st.pulse = pulse && typeof pulse.at === 'number' && typeof pulse.phase === 'string' ? { ...pulse, mtimeMs: pst.mtimeMs } : undefined;
+    }
+
     // Subagent transcripts (tokens only), current layout.
     const now = ctx.now();
     if (now - st.lastSubagentScan >= 5_000) {
@@ -646,6 +674,25 @@ export class ClaudeCodeAdapter implements Adapter {
       }
     }
 
+    // The plugin's heartbeat is exact: it reports the model's stream and tools as they happen.
+    let pulse: AgentSession['pulse'];
+    const beat = st.pulse;
+    if (beat && beat.at >= st.startedAt && PULSE_ACTIVE.has(beat.phase as PulsePhase)) {
+      if (now - beat.at < PULSE_FRESH_MS) {
+        pulse = { phase: beat.phase as PulsePhase, since: beat.since, at: beat.at, label: beat.label, detail: beat.detail, lastDataAt: beat.lastDataAt };
+        lastSignal = Math.max(lastSignal, beat.at);
+        if (beat.phase === 'needs-you') {
+          status = 'waiting';
+          detail = beat.label ? `Needs you: ${truncate(beat.label, 80)}` : 'Needs your input';
+        } else if (status !== 'waiting' && status !== 'error') status = 'working';
+      } else if (st.updatedAt <= beat.at + PULSE_FRESH_MS && (status === 'working' || status === 'waiting')) {
+        // It was working, and both its heartbeat and its transcript went quiet: closed or frozen.
+        pulse = { phase: 'gone', since: beat.at, at: beat.at };
+        status = 'stale';
+        detail = 'Claude Code stopped responding';
+      }
+    }
+
     if (status === 'working') {
       const stale = staleness(lastSignal, ctx);
       if (stale) {
@@ -687,6 +734,8 @@ export class ClaudeCodeAdapter implements Adapter {
       current: status === 'working' || status === 'waiting' || status === 'stale' ? st.timer.current(tasks) : undefined,
       recent: st.recent.slice(0, 5),
       trouble: status === 'working' || status === 'stale' ? st.trouble : undefined,
+      pulse,
+      pushedByPlugin: beat?.push === true && beat.at >= st.startedAt ? true : undefined,
       sources: [st.file],
     };
   }

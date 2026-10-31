@@ -229,3 +229,48 @@ test('Claude Code: subagent transcripts add tokens to the parent session', async
   assert.equal(s.activity?.kind, 'subagent');
   assert.equal(s.activeSubagents, 1);
 });
+
+test('Claude Code: the Kvali plugin heartbeat gives exact liveness, and its silence means the agent is gone', async () => {
+  const home = tmpHome();
+  const clock = new Clock('2026-10-30T10:00:00.000Z');
+  const file = path.join(home, '.claude', 'projects', '-work-shop', `${SID}.jsonl`);
+  writeJsonl(file, [
+    { ...base(clock, 0), type: 'user', message: { role: 'user', content: 'Refactor the checkout' } },
+    ...assistant(clock, 1_000, 'a', [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: '/work/shop/a.ts' } }], 'tool_use'),
+    toolResult(clock, 2_000, 'tu_1', 'ok'),
+  ]);
+  const beat = path.join(home, '.kvali', 'live', 'claude-code', `${SID}.mod.json`);
+  const write = (body: Record<string, unknown>) => writeText(beat, JSON.stringify({ v: 1, agent: 'claude-code', sessionId: SID, ...body }));
+
+  // Six silent minutes would look stuck; the heartbeat says the model is thinking.
+  clock.advance(6 * 60_000);
+  write({ at: clock.t - 2_000, phase: 'thinking', since: clock.t - 6 * 60_000, push: true });
+  const engine = engineFor(new ClaudeCodeAdapter(), home, clock);
+  let s = await only(engine);
+  assert.equal(s.status, 'working');
+  assert.equal(s.pushedByPlugin, true, 'the plugin sends this session\'s phone notifications');
+  assert.deepEqual([s.pulse?.phase, s.pulse?.since], ['thinking', clock.t - 6 * 60_000]);
+
+  // A question for the person, reported by the plugin without any hooks.
+  write({ at: clock.t, phase: 'needs-you', since: clock.t, label: 'allow Bash (rm -rf dist)?' });
+  s = await only(engine);
+  assert.equal(s.status, 'waiting');
+  assert.equal(s.statusDetail, 'Needs you: allow Bash (rm -rf dist)?');
+
+  // Working, then neither the heartbeat nor the transcript changes: closed or frozen.
+  write({ at: clock.t, phase: 'running', since: clock.t, label: 'Run the tests' });
+  s = await only(engine);
+  assert.equal(s.pulse?.phase, 'running');
+  clock.advance(45_000);
+  s = await only(engine);
+  assert.equal(s.status, 'stale');
+  assert.equal(s.pulse?.phase, 'gone');
+
+  // A finished turn is the transcript's to report: a terminal phase adds nothing.
+  write({ at: clock.t, phase: 'done', since: clock.t });
+  appendJsonl(file, [...assistant(clock, 0, 'b', [{ type: 'text', text: 'Done.' }], 'end_turn')]);
+  clock.advance(1_000);
+  s = await only(engine);
+  assert.equal(s.pulse, undefined);
+  assert.notEqual(s.status, 'stale');
+});

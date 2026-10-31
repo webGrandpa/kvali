@@ -10,6 +10,7 @@ import {
   groupByProject,
   pathWithin,
   progressOf,
+  qrMatrix,
   sessionTodayTokens,
   sessionTokens,
   todayUsage,
@@ -19,7 +20,7 @@ import {
   type SessionStatus,
   type TaskItem,
 } from '@kvali/core/browser';
-import type { FromWebview, Scope, ViewState } from '../src/messages.ts';
+import type { FromWebview, PhoneView, Scope, ViewState } from '../src/messages.ts';
 import { Chevron, StatusIcon, TaskIcon } from './icons.tsx';
 
 declare function acquireVsCodeApi(): { postMessage(m: unknown): void; getState(): unknown; setState(s: unknown): void };
@@ -172,8 +173,48 @@ function Liveness({ s, now }: { s: AgentSession; now: number }) {
     const retry = s.trouble.attempt ? ` · retry ${s.trouble.attempt}${s.trouble.maxAttempts ? `/${s.trouble.maxAttempts}` : ''}` : '';
     return <div class="live warn">⚠ Connection or API problem{retry}: {s.trouble.message}</div>;
   }
+  const p = s.pulse;
+  if (p) {
+    // Reported from inside the agent by Kvali's Claude Code plugin: no guessing needed.
+    const t = fmtDuration(now - p.since);
+    switch (p.phase) {
+      case 'requesting':
+        return <div class="live ok">● Waiting for the model · {t}</div>;
+      case 'thinking':
+        return <div class="live ok">● Thinking · {t}</div>;
+      case 'writing':
+        return <div class="live ok">● Writing the answer · {t}</div>;
+      case 'tool-input':
+        return <div class="live ok">● Preparing {p.label ?? 'a tool call'} · {t}</div>;
+      case 'running':
+        return <div class="live">◌ Running “{p.label ?? 'a tool'}” · {t}</div>;
+      case 'needs-you':
+        return <div class="live warn">! Needs you: {p.label ?? 'waiting for your answer'}</div>;
+      case 'stalled':
+        return (
+          <div class="live warn">
+            ⚠ No data from the API for {fmtDuration(now - (p.lastDataAt ?? p.since))}. The connection may be down; Claude Code retries on its own.
+          </div>
+        );
+      case 'gone':
+        return (
+          <div class="live warn">
+            ⚠ Claude Code stopped responding {fmtAgo(p.at, now)}: it was closed or froze. Check its window.
+          </div>
+        );
+    }
+  }
   if (quiet < 30_000) return <div class="live ok">● Active · last action {fmtAgo(s.updatedAt, now)}</div>;
-  if (running) return <div class="live">◌ Waiting for “{a!.label}” to finish · {fmtDuration(now - a!.startedAt)}</div>;
+  if (running) {
+    // A bare tool name ("Shell", "Bash") says less than the command itself.
+    const what = a!.kind === 'command' && a!.detail && /^(Shell|Bash)$/.test(a!.label) ? a!.detail : a!.label;
+    const cut = what.length > 48 ? `${what.slice(0, 47)}…` : what;
+    return (
+      <div class="live">
+        ◌ Waiting for “{cut}” to finish · {fmtDuration(now - a!.startedAt)}
+      </div>
+    );
+  }
   if (quiet < QUIET_WARN_MS) return <div class="live muted">◌ Thinking · quiet for {fmtDuration(quiet)}</div>;
   return (
     <div class="live warn">
@@ -226,7 +267,8 @@ function Card({
   const showToday = tok !== undefined && todayTok !== undefined && todayTok < tok * 0.95;
   const ctxPct = s.context?.window ? Math.min(100, Math.round((s.context.used / s.context.window) * 100)) : undefined;
   const working = s.status === 'working';
-  const showDetail = !!s.statusDetail && !working;
+  // Stale cards say it in the liveness line instead ("No output for 45m and nothing is running").
+  const showDetail = !!s.statusDetail && !working && s.status !== 'stale';
   const canResume = (s.agent === 'claude-code' || s.agent === 'codex') && !working && s.status !== 'waiting';
 
   return (
@@ -270,8 +312,11 @@ function Card({
           </span>
         )}
         {ctxPct !== undefined && (
-          <span class="ctx" title={`Context window: ${fmtTokens(s.context!.used)} of ${fmtTokens(s.context!.window)}`}>
-            ctx <Meter value={ctxPct} label="Context window used" /> {ctxPct}%
+          <span
+            class="ctx"
+            title={`Context window: ${fmtTokens(s.context!.used)} of ${fmtTokens(s.context!.window)} tokens used. This is everything the model holds in mind for this conversation. Near 100% the agent compacts the conversation into a summary and can lose details.`}
+          >
+            context <Meter value={ctxPct} label="Context window used" /> {ctxPct}%
           </span>
         )}
         {s.activeSubagents ? <span>{s.activeSubagents} subagent{s.activeSubagents > 1 ? 's' : ''}</span> : null}
@@ -425,6 +470,77 @@ function Empty({ hours, scope }: { hours: number; scope: Scope }) {
   );
 }
 
+/** Black on white whatever the theme: phone cameras need the contrast. */
+function Qr({ text, size = 168 }: { text: string; size?: number }) {
+  const m = qrMatrix(text);
+  const q = 2;
+  const n = m.length + q * 2;
+  let d = '';
+  m.forEach((row, r) =>
+    row.forEach((on, c) => {
+      if (on) d += `M${c + q} ${r + q}h1v1h-1z`;
+    }),
+  );
+  return (
+    <svg class="qr" viewBox={`0 0 ${n} ${n}`} width={size} height={size} shape-rendering="crispEdges" role="img" aria-label="QR code that subscribes the ntfy app to Kvali's notifications">
+      <rect width={n} height={n} fill="#fff" />
+      <path d={d} fill="#000" />
+    </svg>
+  );
+}
+
+const PHONE_EVENT_LABEL: Record<string, string> = {
+  'needs-you': 'needs you',
+  done: 'finished a long task',
+  error: 'failed',
+  stuck: 'went quiet or stopped responding',
+  steps: 'finished a step',
+};
+
+function PhoneCard({ phone }: { phone: PhoneView }) {
+  const events = phone.events.map((e) => PHONE_EVENT_LABEL[e] ?? e);
+  const self = !/^https:\/\/ntfy\.sh$/.test(phone.server);
+  return (
+    <aside class="setup phone" aria-label="Phone notifications">
+      <p class="setup-title">
+        <b>Notifications on your phone</b>
+      </p>
+      <ol>
+        <li>
+          Install the free <b>ntfy</b> app (iPhone or Android).
+        </li>
+        <li>
+          <b>Android:</b> scan the code. <b>iPhone:</b> in ntfy tap <b>+</b> and enter the topic below{self ? <> with server <code>{phone.server}</code></> : null}.
+        </li>
+      </ol>
+      <div class="qr-wrap">
+        <Qr text={phone.link} />
+      </div>
+      <p class="topic">
+        <code>{phone.topic}</code>{' '}
+        <button class="link" onClick={() => post({ type: 'copy', text: phone.topic })}>
+          Copy
+        </button>
+      </p>
+      <p class="muted small">
+        You get a notification when an agent {events.length > 1 ? `${events.slice(0, -1).join(', ')} or ${events.at(-1)}` : events[0]}. The topic name is the key: keep it to yourself.
+        {phone.details ? ' Notifications name the project and the step; never code or prompts.' : ' Notifications leave out project and step names.'}
+      </p>
+      <div class="setup-actions">
+        <button class="btn" onClick={() => post({ type: 'command', command: 'kvali.phoneTest' })}>
+          Send a test
+        </button>
+        <button class="link" onClick={() => post({ type: 'hidePhoneCard' })}>
+          Done
+        </button>
+        <button class="link" onClick={() => post({ type: 'command', command: 'kvali.phoneOff' })}>
+          Turn off
+        </button>
+      </div>
+    </aside>
+  );
+}
+
 function App() {
   const [st, setSt] = useState<ViewState>();
   const [now, setNow] = useState(Date.now());
@@ -498,6 +614,7 @@ function App() {
           </div>
         </aside>
       )}
+      {st.phoneCard && st.phone && <PhoneCard phone={st.phone} />}
       <Counts sessions={sessions} />
       <Limits sessions={sessions} now={now} />
 
@@ -512,6 +629,14 @@ function App() {
             Repair
           </button>
         </aside>
+      )}
+
+      {!st.phone && groups.length > 0 && (
+        <p class="foot">
+          <button class="link" onClick={() => post({ type: 'command', command: 'kvali.phoneSetup' })}>
+            Get these alerts on your phone
+          </button>
+        </p>
       )}
 
       {st.snapshot.errors.map((e) => (

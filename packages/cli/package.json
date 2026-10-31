@@ -1,6 +1,6 @@
 {
   "name": "@kvali/cli",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "description": "Terminal dashboard for AI coding agents: live task progress, tokens and cost for Claude Code, Codex, Gemini CLI, Antigravity and more.",
   "license": "MIT",
   "type": "module",

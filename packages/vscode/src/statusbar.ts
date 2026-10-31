@@ -56,8 +56,15 @@ export class StatusBar {
       if (working.length > 1) parts.push(`+${working.length - 1}`);
       const quiet = now - s.updatedAt;
       const running = s.activity && !s.activity.endedAt && s.activity.kind !== 'thinking' && s.activity.kind !== 'message';
-      const stuck = (!!s.trouble && now - s.trouble.at < 15 * 60_000) || (!running && quiet > 5 * 60_000);
+      // The plugin's heartbeat, when there is one, is exact; otherwise judge by silence.
+      const stuck = s.pulse
+        ? s.pulse.phase === 'stalled' || s.pulse.phase === 'gone'
+        : (!!s.trouble && now - s.trouble.at < 15 * 60_000) || (!running && quiet > 5 * 60_000);
       this.item.text = `${stuck ? '$(warning)' : '$(sync~spin)'} ${parts.join(' · ')}${stuck ? ` · quiet ${Math.round(quiet / 60_000)}m` : ''}`;
+    } else if (ws.some((s) => s.pulse?.phase === 'gone')) {
+      const s = ws.find((x) => x.pulse?.phase === 'gone')!;
+      this.item.text = `$(warning) ${s.agentLabel} stopped responding`;
+      this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
     } else {
       const recent = ws.find((s) => now - s.updatedAt < RECENT_MS);
       if (recent) {

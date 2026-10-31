@@ -76,6 +76,8 @@ export interface DailyUsage {
   costUsd: number;
 }
 
+export type PulsePhase = 'requesting' | 'thinking' | 'writing' | 'tool-input' | 'running' | 'needs-you' | 'stalled' | 'gone';
+
 export interface AgentSession {
   /** Globally unique: `${agent}:${id}`. */
   key: string;
@@ -107,6 +109,14 @@ export interface AgentSession {
   recent?: Activity[];
   /** Set while the agent reports an API or connection problem, e.g. while retrying. */
   trouble?: { message: string; at: number; attempt?: number; maxAttempts?: number };
+  /**
+   * Exact liveness reported from inside the agent by Kvali's Claude Code plugin: what the
+   * model's stream and tools are doing right now. `gone` means the agent was working and
+   * its heartbeat stopped, so it was closed or froze.
+   */
+  pulse?: { phase: PulsePhase; since: number; at: number; label?: string; detail?: string; lastDataAt?: number };
+  /** Kvali's Claude Code plugin sends this session's phone notifications itself. */
+  pushedByPlugin?: boolean;
   /** `undefined` means the agent does not expose token usage locally. */
   tokens?: TokenUsage;
   /** Estimated cost at API list prices. `undefined` when pricing is unknown. */

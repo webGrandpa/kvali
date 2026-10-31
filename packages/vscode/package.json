@@ -2,7 +2,7 @@
   "name": "kvali",
   "displayName": "Kvali — AI Agent Progress & Tokens",
   "description": "One progress bar for every AI coding agent: live task progress, current step, tokens, cost and plan limits for Claude Code, Codex, Gemini CLI, Antigravity and any agent that reads AGENTS.md.",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "publisher": "webgrandpa",
   "author": {
     "name": "Giorgi Khiladze",
@@ -118,6 +118,22 @@
         "command": "kvali.reportProblem",
         "title": "Report a Problem",
         "category": "Kvali"
+      },
+      {
+        "command": "kvali.phoneSetup",
+        "title": "Send Notifications to My Phone",
+        "category": "Kvali",
+        "icon": "$(device-mobile)"
+      },
+      {
+        "command": "kvali.phoneTest",
+        "title": "Send a Test Notification to My Phone",
+        "category": "Kvali"
+      },
+      {
+        "command": "kvali.phoneOff",
+        "title": "Stop Phone Notifications",
+        "category": "Kvali"
       }
     ],
     "menus": {
@@ -151,6 +167,11 @@
           "command": "kvali.turnOff",
           "when": "view == kvali.sessions",
           "group": "more@4"
+        },
+        {
+          "command": "kvali.phoneSetup",
+          "when": "view == kvali.sessions",
+          "group": "more@0"
         }
       ]
     },
@@ -284,7 +305,7 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc -p . && tsc -p webview",
-    "package": "node esbuild.mjs --production && vsce package --no-dependencies --out kvali-0.3.0.vsix",
+    "package": "node esbuild.mjs --production && vsce package --no-dependencies --out kvali-0.5.0.vsix",
     "vscode:uninstall": "node ./dist/uninstall.js"
   },
   "devDependencies": {

@@ -1,0 +1,225 @@
+import assert from 'node:assert/strict';
+import { readFileSync, statSync } from 'node:fs';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import path from 'node:path';
+import { test } from 'node:test';
+import type { AgentSession, Snapshot, TaskItem } from '../src/model.ts';
+import {
+  newTopic,
+  ntfyRequest,
+  PushPlanner,
+  readPhoneConfig,
+  sendPush,
+  subscribeLink,
+  testPush,
+  writePhoneConfig,
+  type PhoneConfig,
+  type PhoneEvent,
+} from '../src/phone.ts';
+import { qrMatrix, qrTerminal } from '../src/qr.ts';
+import { tmpHome, writeText } from './helpers.ts';
+
+const ALL: { events: PhoneEvent[]; details: boolean } = { events: ['needs-you', 'done', 'error', 'stuck', 'steps'], details: true };
+
+function session(over: Partial<AgentSession> = {}): AgentSession {
+  return {
+    key: 'claude-code:s1',
+    agent: 'claude-code',
+    agentLabel: 'Claude Code',
+    id: 's1',
+    title: 'Checkout page with Stripe',
+    projectPath: '/Users/dev/code/storefront',
+    status: 'working',
+    startedAt: 0,
+    updatedAt: 0,
+    tasks: [],
+    sources: [],
+    ...over,
+  };
+}
+
+const snap = (...sessions: AgentSession[]): Snapshot => ({ generatedAt: 0, sessions, errors: [] });
+const tasks = (done: number, total: number): TaskItem[] =>
+  Array.from({ length: total }, (_, i) => ({ id: String(i + 1), title: `Step ${i + 1}`, status: i < done ? 'completed' : i === done ? 'in_progress' : 'pending' }) as TaskItem);
+
+test('phone setup: an unguessable topic, saved owner-only next to other settings', async () => {
+  const home = tmpHome();
+  const topic = newTopic();
+  assert.match(topic, /^kvali-[a-km-np-z2-9]{16}$/);
+  assert.notEqual(newTopic(), topic);
+
+  writeText(path.join(home, '.kvali', 'config.json'), JSON.stringify({ other: 1 }));
+  const cfg: PhoneConfig = { server: 'https://ntfy.example.com/', topic, events: ['needs-you'], details: false, token: 'tk_secret' };
+  await writePhoneConfig(home, cfg);
+  const file = path.join(home, '.kvali', 'config.json');
+  if (process.platform !== 'win32') assert.equal(statSync(file).mode & 0o777, 0o600);
+  assert.deepEqual(await readPhoneConfig(home), { ...cfg, server: 'https://ntfy.example.com' });
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).other, 1, 'other settings are kept');
+
+  await writePhoneConfig(home, undefined);
+  assert.equal(await readPhoneConfig(home), undefined);
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { other: 1 });
+
+  writeText(file, JSON.stringify({ phone: { topic: 'bad topic/../x' } }));
+  assert.equal(await readPhoneConfig(home), undefined, 'an invalid topic is ignored');
+});
+
+test('phone links and requests', () => {
+  assert.equal(subscribeLink({ server: 'https://ntfy.sh', topic: 'kvali-abc' }), 'ntfy://ntfy.sh/kvali-abc?display=Kvali');
+  assert.equal(subscribeLink({ server: 'http://box.lan:8080/ntfy', topic: 't' }), 'ntfy://box.lan:8080/ntfy/t?display=Kvali&secure=false');
+  const req = ntfyRequest({ server: 'https://ntfy.sh', topic: 'kvali-abc', events: [], details: true, token: 'tk_1' }, testPush());
+  assert.equal(req.url, 'https://ntfy.sh');
+  assert.equal(req.headers.Authorization, 'Bearer tk_1');
+  assert.deepEqual(JSON.parse(req.body), { topic: 'kvali-abc', title: 'Kvali is connected', message: testPush().message, priority: 3, tags: ['white_check_mark'] });
+});
+
+test('sendPush publishes JSON to the server and reports failures in words', async () => {
+  const got: { url?: string; body?: string; auth?: string }[] = [];
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      got.push({ url: req.url, body, auth: req.headers.authorization });
+      if (JSON.parse(body).topic === 'forbidden') {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end('{"error":"forbidden"}');
+      } else {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"id":"x"}');
+      }
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const ok = await sendPush({ server: base, topic: 'kvali-t', events: [], details: true }, { ...testPush(), title: 'Claude Code ✓ ქართული' });
+    assert.deepEqual(ok, { ok: true });
+    assert.equal(got[0]!.url, '/');
+    assert.equal(JSON.parse(got[0]!.body!).title, 'Claude Code ✓ ქართული', 'non-ASCII titles arrive intact');
+    const denied = await sendPush({ server: base, topic: 'forbidden', events: [], details: true, token: 'tk' }, testPush());
+    assert.equal(denied.ok, false);
+    assert.match((denied as { error: string }).error, /answered 403/);
+    assert.equal(got[1]!.auth, 'Bearer tk');
+  } finally {
+    server.close();
+  }
+  const down = await sendPush({ server: 'http://127.0.0.1:9', topic: 't', events: [], details: true }, testPush());
+  assert.match((down as { error: string }).error, /could not reach 127\.0\.0\.1:9/);
+});
+
+test('push planner: needs you, a long task finished, an error; nothing for short or interrupted work', () => {
+  let now = 1_000_000;
+  const planner = new PushPlanner({ now: () => now });
+  const kinds = (s: AgentSession) => planner.observe(snap(s), ALL).map((p) => p.title);
+
+  assert.deepEqual(kinds(session({ status: 'waiting', updatedAt: now - 60_000 })), [], 'a wait older than Kvali is not news');
+  now += 1_000;
+  assert.deepEqual(kinds(session({ status: 'working', updatedAt: now })), []);
+  now += 1_000;
+  const ask = planner.observe(snap(session({ status: 'waiting', statusDetail: 'Needs approval: Bash', updatedAt: now })), ALL);
+  assert.equal(ask[0]!.title, 'Claude Code needs you · storefront');
+  assert.match(ask[0]!.message, /^Needs approval: Bash\nCheckout page with Stripe$/);
+  assert.equal(ask[0]!.priority, 4);
+
+  now += 1_000;
+  kinds(session({ status: 'working', updatedAt: now, tasks: tasks(1, 3) }));
+  now += 3 * 60_000;
+  assert.deepEqual(kinds(session({ status: 'done', updatedAt: now, tasks: tasks(3, 3) })), [], 'waits a moment: a queued prompt may follow');
+  now += 3_000;
+  const done = planner.observe(snap(session({ status: 'done', updatedAt: now - 3_000, tasks: tasks(3, 3), tokens: { input: 1, output: 2, cacheRead: 3_000_000, cacheWrite: 0 } })), ALL);
+  assert.equal(done[0]!.title, 'Claude Code finished · storefront');
+  assert.equal(done[0]!.message, 'Checkout page with Stripe\nDone in 4m 03s · 3/3 tasks · 3.00M tokens');
+
+  // Short work: no push. Interrupted: no push.
+  now += 1_000;
+  kinds(session({ status: 'working', updatedAt: now }));
+  now += 30_000;
+  kinds(session({ status: 'idle', updatedAt: now }));
+  now += 5_000;
+  assert.deepEqual(kinds(session({ status: 'idle', updatedAt: now })), []);
+  kinds(session({ status: 'working', updatedAt: now }));
+  now += 5 * 60_000;
+  kinds(session({ status: 'idle', statusDetail: 'Interrupted', updatedAt: now }));
+  now += 5_000;
+  assert.deepEqual(kinds(session({ status: 'idle', statusDetail: 'Interrupted', updatedAt: now })), []);
+
+  // An error is always worth a push; so is a stop in the middle of a plan.
+  kinds(session({ status: 'working', updatedAt: now, tasks: tasks(1, 4) }));
+  now += 1_000;
+  assert.deepEqual(kinds(session({ status: 'error', statusDetail: 'API Error: 529 overloaded', updatedAt: now })), ['Claude Code stopped with an error · storefront']);
+  kinds(session({ status: 'working', updatedAt: now, tasks: tasks(1, 4) }));
+  now += 4 * 60_000;
+  kinds(session({ status: 'idle', updatedAt: now, tasks: tasks(2, 4) }));
+  now += 4_000;
+  const paused = planner.observe(snap(session({ status: 'idle', updatedAt: now, tasks: tasks(2, 4) })), ALL);
+  assert.equal(paused[0]!.title, 'Claude Code stopped and is waiting for you · storefront');
+  assert.equal(paused[0]!.message, 'Checkout page with Stripe\nStopped at 2/4 tasks · Step 3');
+});
+
+test('push planner: quiet, API trouble and a vanished agent, once each; plugin sessions are left to the plugin', () => {
+  let now = 5_000_000;
+  const planner = new PushPlanner({ now: () => now });
+  const titles = (...ss: AgentSession[]) => planner.observe(snap(...ss), ALL).map((p) => p.title);
+
+  titles(session({ status: 'working', updatedAt: now }));
+  now += 11 * 60_000;
+  const running = { kind: 'command' as const, label: 'pnpm build', startedAt: now - 11 * 60_000 };
+  assert.deepEqual(titles(session({ status: 'working', updatedAt: now - 11 * 60_000, activity: running })), [], 'a long command is not silence');
+  assert.deepEqual(titles(session({ status: 'working', updatedAt: now - 11 * 60_000 })), ['Claude Code has been quiet · storefront']);
+  now += 60_000;
+  assert.deepEqual(titles(session({ status: 'stale', updatedAt: now - 12 * 60_000 })), [], 'once per quiet spell');
+
+  now += 1_000;
+  const trouble = { message: 'Connection error', at: now, attempt: 3, maxAttempts: 10 };
+  titles(session({ status: 'working', updatedAt: now, trouble }));
+  now += 60_000;
+  assert.deepEqual(titles(session({ status: 'working', updatedAt: now, trouble: { ...trouble, at: now } })), [], 'a short retry is not news');
+  now += 61_000;
+  const t = planner.observe(snap(session({ status: 'working', updatedAt: now, trouble: { ...trouble, at: now, attempt: 7 } })), ALL);
+  assert.equal(t[0]!.title, 'Claude Code: connection or API problem · storefront');
+  assert.match(t[0]!.message, /^Connection error · retry 7\/10/);
+  now += 30_000;
+  assert.deepEqual(titles(session({ status: 'working', updatedAt: now, trouble: { ...trouble, at: now } })), []);
+
+  // The plugin reports its own session; Kvali still tells when it stops responding.
+  const plugin = session({ key: 'claude-code:p', pushedByPlugin: true, status: 'working', updatedAt: now });
+  titles(plugin);
+  now += 1_000;
+  assert.deepEqual(titles({ ...plugin, status: 'waiting', updatedAt: now }), []);
+  now += 1_000;
+  const gone = { ...plugin, status: 'stale' as const, updatedAt: now - 40_000, pulse: { phase: 'gone' as const, since: now - 40_000, at: now - 40_000 } };
+  assert.deepEqual(titles(gone), ['Claude Code stopped responding · storefront']);
+  assert.deepEqual(titles(gone), []);
+});
+
+test('push planner: steps are opt-in and spaced out; without details no names leave the computer', () => {
+  let now = 9_000_000;
+  const planner = new PushPlanner({ now: () => now });
+  const quiet = { events: ['needs-you', 'done'] as PhoneEvent[], details: false };
+  planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(0, 4) })), ALL);
+  now += 1_000;
+  const step = planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(1, 4) })), ALL);
+  assert.deepEqual(
+    step.map((p) => [p.title, p.message, p.priority]),
+    [['Claude Code · storefront · 1/4', 'Now: Step 2', 2]],
+  );
+  now += 10_000;
+  assert.deepEqual(planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(2, 4) })), ALL), [], 'at most one a minute');
+  assert.deepEqual(planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(2, 4) })), quiet), []);
+
+  now += 1_000;
+  const ask = planner.observe(snap(session({ status: 'waiting', statusDetail: 'Needs approval: rm -rf secrets/', updatedAt: now, tasks: tasks(2, 4) })), quiet);
+  assert.equal(ask[0]!.title, 'Claude Code needs you');
+  assert.equal(ask[0]!.message, 'Waiting for your answer\n2/4 tasks');
+  assert.doesNotMatch(JSON.stringify(ask), /storefront|Stripe|secrets|Step/);
+});
+
+test('QR codes: a matrix for the panel and half blocks for a terminal', () => {
+  const m = qrMatrix('ntfy://ntfy.sh/kvali-abcdefghijkmnpqr?display=Kvali');
+  assert.ok(m.length >= 25 && m.length % 4 === 1, 'a valid QR size');
+  assert.ok(m[0]![0] && m[0]![6] && !m[0]![7], 'finder pattern in the corner');
+  const text = qrTerminal('hello', false);
+  assert.equal(text.split('\n').length, Math.ceil((qrMatrix('hello').length + 4) / 2));
+  assert.match(qrTerminal('hello'), /^\x1b\[38;5;16;48;5;231m/);
+});

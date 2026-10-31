@@ -38,3 +38,5 @@ export type { InstructionTarget } from './protocol.ts';
 export { CLAUDE_PLAN_CONTEXT, claudeHookReply } from './hooks/replies.ts';
 export { applySetup, detectAgents, detectedLabels, removeSetup, setupChanges } from './setup.ts';
 export type { DetectedAgents } from './setup.ts';
+export * from './phone.ts';
+export * from './qr.ts';

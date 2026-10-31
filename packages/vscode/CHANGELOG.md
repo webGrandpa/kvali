@@ -1,11 +1,24 @@
 # Changelog
 
+## 0.5.0 — 2026-10-31
+
+- **Phone notifications** through the free ntfy app (iPhone and Android): "needs you", a long task finished or stopped mid-plan, an error, API trouble, a quiet or vanished agent, and optionally each finished step, for every agent. One command sets it up with a QR code (**Kvali: Send Notifications to My Phone** or `kvali phone`); one window per machine sends, so each event arrives once.
+- `kvali watch`: hooks and phone notifications without the dashboard, for terminal-only setups.
+- The Claude Code plugin (0.2.0) sends its own session's notifications with exact timing, and tells the extension so nothing arrives twice.
+
+## 0.4.0 — 2026-10-31
+
+- **Kvali for Claude Code**, a plugin (`packages/claude-plugin`): a pane beside the chat with the plan's progress bar, the current step and its time, what Claude is doing right now and the session's tokens, in the terminal, the desktop app and the VS Code extension. It reads Claude Code's own events (the model's stream, tool calls, permission prompts, compaction), so "thinking for 6 minutes" and "no data from the API for 1m 30s" are facts, not guesses.
+- The extension reads the plugin's heartbeat: exact liveness in the sidebar for Claude Code sessions, "Needs you" without hooks, and a warning within 30 seconds when a working Claude Code was closed or froze.
+
 ## 0.3.0 — 2026-10-31
 
 - **Progress inside the current step**: time on the step compared with the plan's earlier steps ("4m of ~6m"; amber when it runs long) and the number of actions taken on it. For Claude Code this also works after a long conversation is compacted, using the task files' timestamps.
 - **Is it stuck?** A liveness line on every working card: active, waiting for a long command, thinking, connection/API problem with retry count, or "no output for 9m and nothing is running". The status bar shows a warning in the last two cases.
 - **Latest actions**: the agent's last three tool calls with their durations (Claude Code, Codex, Antigravity).
 - A `.agents/progress.md` written by Claude Code, Codex, Gemini or Antigravity now merges into that agent's card instead of showing a second card without live data; the AGENTS.md protocol tells those agents to use their built-in plan tools instead.
+- The context meter reads "context 43%" instead of "ctx", and its tooltip explains what the context window is and what happens near 100%.
+- README screenshots show the current panel.
 - **Kvali: Add Progress Protocol to AGENTS.md** updates an older Kvali section in place, and setup keeps the global plan rules current the same way.
 
 ## 0.2.0 — 2026-10-31

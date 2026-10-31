@@ -24,6 +24,17 @@ pnpm build
 2. Open the repository in VS Code and press <kbd>F5</kbd> (**Run Kvali Extension**). An Extension Development Host opens with Kvali loaded; `pnpm --filter kvali watch` rebuilds on save.
 3. `pnpm package` produces `packages/vscode/kvali-<version>.vsix`.
 
+## Working on the Claude Code plugin
+
+`packages/claude-plugin` is a Claude Code plugin with function hooks (no build step). Check it with Claude Code itself:
+
+```bash
+claude plugin validate packages/claude-plugin
+claude plugin test packages/claude-plugin
+```
+
+To try it live, run `claude --plugin-dir packages/claude-plugin`: saving a file reloads it.
+
 ## Pull requests
 
 - Keep adapters read-only, local and cheap (see [docs/ADAPTERS.md](docs/ADAPTERS.md)).
