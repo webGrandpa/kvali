@@ -19,7 +19,7 @@ Long agent runs are a black box. You either babysit the chat or keep asking for 
 - **What it is doing right now**: "Running `pnpm test` · 41s", "Editing `src/app.tsx`", the last few actions, and how long the current step is taking compared with the earlier ones ("4m of ~6m").
 - **Stuck or working?** Each working agent shows whether it is active, waiting for a long command, retrying after a connection/API error, or silent with nothing running. With the [Claude Code plugin](#claude-code-plugin) this is exact for Claude Code: thinking, writing, running a tool, waiting for you, no data from the API, or closed.
 - **Needs you**: permission prompts and questions surface in the status bar and as notifications, including OS notifications when the editor is in the background.
-- **On your phone**: the same alerts as push notifications through the free [ntfy](https://ntfy.sh) app (iPhone and Android), for every agent. See [Phone notifications](#phone-notifications).
+- **On your phone**: each task's progress as one silent notification that every finished step updates, and an alert when an agent needs you, finishes, fails or goes quiet, through the free [ntfy](https://ntfy.sh) app (iPhone and Android), for every agent. See [Phone notifications](#phone-notifications).
 - **Tokens and API value**: per session, per project and per day, with input, output, cache and context usage. API value is what the tokens would cost at list prices (built in for Anthropic models, configurable for others); subscriptions are not billed per token.
 - **Plan limits**: 5-hour and weekly usage for Codex subscriptions, straight from Codex's own logs.
 - **Every project at once**: sessions are grouped by project; the current workspace comes first.
@@ -54,7 +54,10 @@ With the editor extension installed too, the plugin's heartbeat (`~/.kvali/live/
 
 ## Phone notifications
 
-Get a push on your phone when an agent needs you, finishes a long task (two minutes or more), fails, or goes quiet, for every agent Kvali sees.
+Follow your agents from your phone, for every agent Kvali sees:
+
+- **Progress**: one silent notification per task, `Claude Code · storefront · 3/7` with a bar and the step it is on, updated as steps finish (at most once a minute). When the task ends, the same notification turns into "finished" or "stopped at 5/7". On Android it is updated in place; the iPhone app lists each update, silently.
+- **Alerts**: an agent finished a task (two minutes or more, or any task whose progress you were following), failed, or went quiet, and a question that has waited **a minute** for your answer (high priority). A question you answer at the computer sends nothing, and neither does a stop in the middle of a plan that you pick up within a minute.
 
 1. At the top of the Kvali view click **Get alerts on your phone** (or run **Kvali: Send Notifications to My Phone**, or `kvali phone` in a terminal). Kvali makes a private topic and shows a QR code.
 2. Install the free **ntfy** app. On Android scan the code; on an iPhone tap **+** in ntfy and enter the topic.
@@ -63,26 +66,28 @@ Get a push on your phone when an agent needs you, finishes a long task (two minu
 - **Who sends**: the editor window that holds the hook port (one per machine, so each event arrives once), `kvali` or `kvali watch` (no dashboard, for terminal-only setups). Kvali's Claude Code plugin sends for its own sessions by itself, with exact "needs you" and "no data from the API" alerts.
 - **What a push says**: the agent, the project, the step and progress, for example "Claude Code needs you · storefront / Needs approval: Bash / 3/7 tasks · Writing tests". Never code or prompts. `kvali phone --private` leaves out project and step names too.
 - **Privacy**: on ntfy.sh anyone who knows a topic's name can read it, so Kvali generates an unguessable one (80 random bits). Keep it to yourself, or use your own ntfy server: `kvali phone --server https://ntfy.example.com --token tk_…`.
-- **More or fewer**: `kvali phone --steps` adds a push for each finished step. The setup is `~/.kvali/config.json` (`phone.events`: `needs-you`, `done`, `error`, `stuck`, `steps`). **Kvali: Stop Phone Notifications** or `kvali phone off` turns it off.
+- **More or fewer**: the **Progress** switch in the phone card (or `kvali phone --no-steps`) turns progress off and leaves the alerts. The setup is `~/.kvali/config.json` (`phone.events`: `needs-you`, `done`, `error`, `stuck`, `steps`). **Kvali: Stop Phone Notifications** or `kvali phone off` turns it all off.
 - Using Claude Code with a Pro or Max plan? Claude's own [Remote Control](https://code.claude.com/docs/en/remote-control) also shows a session in the Claude app with push notifications; Kvali adds every other agent and one view of all of them.
 
 ## Install
 
 **Editor extension** (VS Code ≥ 1.90, Antigravity, Cursor, Windsurf, VSCodium):
 
-- From a release: download `kvali-x.y.z.vsix`, then run **Extensions: Install from VSIX…** from the Command Palette (or `code --install-extension kvali-x.y.z.vsix`).
-- From source: `pnpm install && pnpm package`, which writes `packages/vscode/kvali-0.6.0.vsix`.
+- Search for **Kvali** in the Extensions view: VS Code installs it from the VS Code Marketplace; Antigravity, Cursor, Windsurf and VSCodium from Open VSX.
+- Or download `kvali-x.y.z.vsix` from [Releases](https://github.com/webGrandpa/kvali/releases) and run **Extensions: Install from VSIX…** (or `code --install-extension kvali-x.y.z.vsix`).
+- From source: `pnpm install && pnpm package`, which writes `packages/vscode/kvali-<version>.vsix`.
 
 Open the **Kvali** icon in the activity bar and click **Turn on** once. That is the whole setup: Kvali finds the agents on your machine, turns on "needs you" alerts and makes every agent keep a plan, so each task gets a real progress bar. Sessions from the last 24 hours appear automatically.
 
 **Terminal** (any editor, including JetBrains):
 
 ```bash
-pnpm install && pnpm build
-node packages/cli/dist/kvali.mjs          # live dashboard, q to quit
-node packages/cli/dist/kvali.mjs --here   # only this project
-node packages/cli/dist/kvali.mjs --json   # one snapshot as JSON, for scripts
+npx @kvali/cli          # live dashboard, q to quit
+npx @kvali/cli --here   # only this project
+npx @kvali/cli --json   # one snapshot as JSON, for scripts
 ```
+
+`npm install -g @kvali/cli` installs the `kvali` command (`kvali setup`, `kvali phone`, `kvali watch`). From source: `pnpm install && pnpm build && node packages/cli/dist/kvali.mjs`.
 
 ## What "Turn on" does
 

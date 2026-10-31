@@ -753,6 +753,17 @@ time {
 .phone code {
   font-family: var(--vscode-editor-font-family, monospace);
 }
+.phone-progress {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 8px 0 4px;
+  cursor: pointer;
+}
+.phone-progress input {
+  margin: 2px 0 0;
+  accent-color: var(--vscode-checkbox-selectBackground, var(--vscode-focusBorder));
+}
 .phone-row {
   display: flex;
   align-items: center;

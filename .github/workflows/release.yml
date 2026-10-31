@@ -1,0 +1,164 @@
+name: Release
+
+# Publishes a release when a version tag is pushed:
+#   git tag v0.6.0 && git push origin v0.6.0
+# The tag must match the version in packages/*/package.json (scripts/set-version.mjs sets them).
+# Each target is its own job, so one that is not set up yet does not stop the others.
+# Run it by hand (Actions → Release → Run workflow) to build and test without publishing.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publisher: ${{ steps.version.outputs.publisher }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Versions match the tag
+        id: version
+        run: |
+          v=$(node -p "require('./packages/vscode/package.json').version")
+          for p in packages/cli packages/core; do
+            pv=$(node -p "require('./$p/package.json').version")
+            if [ "$pv" != "$v" ]; then echo "::error::$p is $pv, the extension is $v"; exit 1; fi
+          done
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$v" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match version $v"; exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "publisher=$(node -p "require('./packages/vscode/package.json').publisher")" >> "$GITHUB_OUTPUT"
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm package
+      - run: node scripts/pack-cli.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          if-no-files-found: error
+          path: |
+            packages/vscode/kvali-${{ steps.version.outputs.version }}.vsix
+            packages/cli/npm-package/
+
+  github-release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: out
+      - name: GitHub release with the VSIX
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ needs.build.outputs.version }}
+        run: |
+          vsix="out/vscode/kvali-$V.vsix"
+          if gh release view "v$V" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "v$V" "$vsix" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "v$V" "$vsix" --repo "$GITHUB_REPOSITORY" --title "Kvali $V" --generate-notes
+          fi
+
+  vscode-marketplace:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # Marketplace trusted publishing: no token is stored anywhere
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: out
+      - name: Publish to the VS Code Marketplace
+        run: npx --yes @vscode/vsce@4.1.0 publish --oidc --packagePath "out/vscode/kvali-${{ needs.build.outputs.version }}.vsix"
+
+  open-vsx:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    env:
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    steps:
+      - name: Open VSX is not set up yet
+        if: env.OVSX_PAT == ''
+        run: echo "::warning::Add the OVSX_PAT repository secret to publish to Open VSX (see RELEASING.md)."
+      - uses: actions/setup-node@v4
+        if: env.OVSX_PAT != ''
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        if: env.OVSX_PAT != ''
+        with:
+          name: release
+          path: out
+      - name: Open VSX namespace (created by the first release)
+        if: env.OVSX_PAT != ''
+        env:
+          NS: ${{ needs.build.outputs.publisher }}
+        run: |
+          if out=$(npx --yes ovsx@1.3.0 create-namespace "$NS" -p "$OVSX_PAT" 2>&1); then
+            echo "Created the Open VSX namespace $NS."
+          elif grep -q "Namespace already exists" <<<"$out"; then
+            echo "The Open VSX namespace $NS exists."
+          else
+            echo "$out"
+            echo "::error::Could not create the Open VSX namespace $NS (see RELEASING.md)."
+            exit 1
+          fi
+      - name: Publish to Open VSX (Antigravity, Cursor, Windsurf, VSCodium)
+        if: env.OVSX_PAT != ''
+        run: npx --yes ovsx@1.3.0 publish "out/vscode/kvali-${{ needs.build.outputs.version }}.vsix" -p "$OVSX_PAT"
+
+  npm:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # npm trusted publishing and provenance: no token is stored anywhere
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: npm 11.5.1 or newer (trusted publishing)
+        run: npm install -g npm@11
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: out
+      - name: Publish the CLI to npm
+        env:
+          V: ${{ needs.build.outputs.version }}
+        run: |
+          NAME=$(node -p "require('./out/cli/npm-package/package.json').name")
+          if ! npm view "$NAME" version >/dev/null 2>&1; then
+            echo "::warning::$NAME is not on npm yet: publish a placeholder by hand, then make this workflow its trusted publisher (see RELEASING.md)."
+            exit 0
+          fi
+          if [ "$(npm view "$NAME@$V" version 2>/dev/null)" = "$V" ]; then
+            echo "::notice::$NAME@$V is already on npm."
+            exit 0
+          fi
+          npm publish ./out/cli/npm-package --access public --provenance

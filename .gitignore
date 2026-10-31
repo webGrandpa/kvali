@@ -9,3 +9,4 @@ coverage/
 
 # Written by Claude Code when it loads the plugin from this folder
 packages/claude-plugin/.claude-plugin/types/
+packages/cli/npm-package/

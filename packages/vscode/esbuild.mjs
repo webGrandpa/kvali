@@ -44,7 +44,11 @@ const builds = [
   },
 ];
 
-if (production) await rm('dist', { recursive: true, force: true });
+if (production) {
+  await rm('dist', { recursive: true, force: true });
+  // The Marketplace page shows the repository's changelog.
+  await copyFile('../../CHANGELOG.md', 'CHANGELOG.md');
+}
 await mkdir('dist/webview', { recursive: true });
 await copyFile('webview/styles.css', 'dist/webview/main.css');
 // The Claude Code plugin ships inside the extension; Turn on installs it.

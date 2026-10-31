@@ -194,17 +194,14 @@ test('catches up from the task files and the transcript when it loads mid-sessio
   expect(beat.step).toMatchObject({ title: 'Test', startedAt: T0 - 120_000, typicalMs: 300_000 })
 })
 
-test('phone notifications: needs you, a long turn finished, the API going quiet; one each', async ($, on) => {
+test('phone notifications: a question left a minute, a long turn finished, the API going quiet; one each', async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   mock.env(on, { HOME: '/home/u' })
   const phone = { phone: { server: 'https://ntfy.example.com', topic: 'kvali-test', token: 'tk_1', events: ['needs-you', 'done', 'error', 'stuck'], details: true } }
   const { pushes, writes } = engine(on, { '/home/u/.kvali/config.json': { text: JSON.stringify(phone), mtimeMs: T0 } })
-  let answer!: () => void
-  const answered = new Promise<void>(r => {
-    answer = r
-  })
+  let answer: () => void = () => undefined
   on('tool.call', async (_, e) => {
-    if (e.tool === 'AskUserQuestion') await answered
+    if (e.tool === 'AskUserQuestion') await new Promise<void>(r => (answer = r))
     return { result: {} }
   })
   let release!: () => void
@@ -222,9 +219,18 @@ test('phone notifications: needs you, a long turn finished, the API going quiet;
 
   await $.session.start({ cwd: '/w/shop', surface: 'desktop', isInteractive: true })
   await $.turn.start({ text: 'go', turnId: 't1' })
+  // Answered at the computer within seconds: nothing goes to the phone.
+  const quick = $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
+  await clock.advance(4_000)
+  await clock.advance(4_000)
+  answer()
+  await quick
+  expect(pushes).toHaveLength(0)
+  // Left for a minute: the person is away.
   const call = $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
-  await clock.advance(4_000)
-  await clock.advance(4_000)
+  await clock.advance(30_000)
+  expect(pushes).toHaveLength(0)
+  await clock.advance(32_000)
   answer()
   await call
   expect(pushes).toHaveLength(1)
@@ -244,6 +250,85 @@ test('phone notifications: needs you, a long turn finished, the API going quiet;
   expect(pushes.at(-1)!.body).toMatchObject({ title: 'Claude Code finished · w', message: 'Done in 3m 00s · 1.1k tokens', tags: ['white_check_mark'] })
   expect(pushes).toHaveLength(3)
   expect(JSON.parse(writes.at(-1)!.text).push).toBe(true)
+})
+
+test('phone progress: one notification per turn, updated at most once a minute, replaced by its end', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  mock.env(on, { HOME: '/home/u' })
+  // Set up by Kvali 0.5 (no progress in the list, no version): progress is on now.
+  const phone = { phone: { server: 'https://ntfy.example.com', topic: 'kvali-test', events: ['needs-you', 'done', 'error', 'stuck'], details: true } }
+  const { pushes } = engine(on, { '/home/u/.kvali/config.json': { text: JSON.stringify(phone), mtimeMs: T0 } })
+  let nextId = 1
+  on('tool.call', (_, e) => (e.tool === 'TaskCreate' ? { result: { task: { id: String(nextId++), subject: e.subject } } } : { result: {} }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+
+  await $.session.start({ cwd: '/w/shop', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  for (const subject of ['Map the routes', 'Rewrite the loaders', 'Remove the old router']) {
+    await $.tool.call({ tool: 'TaskCreate', subject, description: subject })
+  }
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'in_progress' })
+  await clock.advance(20_000)
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', status: 'in_progress', activeForm: 'Rewriting the loaders' })
+  expect(pushes).toHaveLength(0)
+  await clock.advance(2_000) // the count holds a moment, so the update names the next step
+  expect(pushes).toHaveLength(1)
+  expect(pushes[0]!.body).toMatchObject({ title: 'Claude Code · w · 1/3', message: '███░░░░░░░ 33%\nNow: Rewriting the loaders', priority: 2 })
+  const seq = pushes[0]!.body.sequence_id as string
+  expect(seq).toMatch(/^kvali-s1-[a-z0-9]+$/)
+
+  await clock.advance(10_000)
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', status: 'completed' })
+  await clock.advance(4_000)
+  expect(pushes).toHaveLength(1)
+  await clock.advance(48_000) // the clock's refresh sends what waited
+  expect(pushes.map(p => [p.body.title, p.body.message, p.body.sequence_id])).toEqual([
+    ['Claude Code · w · 1/3', '███░░░░░░░ 33%\nNow: Rewriting the loaders', seq],
+    ['Claude Code · w · 2/3', '███████░░░ 67%\nNext: Remove the old router', seq],
+  ])
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '3', status: 'in_progress' })
+
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '3', status: 'completed' })
+  await $.turn.complete({ answer: '', durationMs: 90_000, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(1_000) // the push goes out after the turn's hook returns
+  expect(pushes).toHaveLength(3)
+  expect(pushes[2]!.body).toMatchObject({ title: 'Claude Code finished · w', message: 'Done in 1m 30s · 3/3 tasks', sequence_id: seq })
+
+  // The next turn has a notification of its own, and a short turn without progress sends nothing.
+  await $.turn.start({ text: 'and the docs?', turnId: 't2' })
+  await clock.advance(30_000)
+  await $.turn.complete({ answer: '', durationMs: 30_000, isAborted: false, turnId: 't2', reason: 'answer' })
+  expect(pushes).toHaveLength(3)
+})
+
+test('a turn that stops mid-plan waits a minute for the person before it is pushed', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  mock.env(on, { HOME: '/home/u' })
+  const phone = { phone: { v: 2, server: 'https://ntfy.example.com', topic: 'kvali-test', events: ['needs-you', 'done', 'error', 'stuck'], details: true } }
+  const { pushes } = engine(on, { '/home/u/.kvali/config.json': { text: JSON.stringify(phone), mtimeMs: T0 } })
+  let nextId = 1
+  on('tool.call', (_, e) => (e.tool === 'TaskCreate' ? { result: { task: { id: String(nextId++), subject: e.subject } } } : { result: {} }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+
+  await $.session.start({ cwd: '/w/shop', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  for (const subject of ['Map the routes', 'Rewrite the loaders']) await $.tool.call({ tool: 'TaskCreate', subject, description: subject })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  await $.turn.complete({ answer: 'Which router?', durationMs: 150_000, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(30_000)
+  expect(pushes).toHaveLength(0)
+  // The person answers at the computer: nothing is sent for that stop.
+  await $.turn.start({ text: 'the new one', turnId: 't2' })
+  await clock.advance(70_000)
+  await $.turn.complete({ answer: 'Ready to delete the old router?', durationMs: 150_000, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(40_000)
+  expect(pushes).toHaveLength(0)
+  await clock.advance(22_000)
+  expect(pushes.map(p => [p.body.title, p.body.message, p.body.priority])).toEqual([['Claude Code stopped and is waiting for you · w', 'Stopped at 1/2 tasks', 4]])
+  expect(pushes[0]!.body.sequence_id).toMatch(/^kvali-s1-/)
 })
 
 test('without a phone setup nothing is sent, and the heartbeat says so', async ($, on) => {

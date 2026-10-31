@@ -305,7 +305,7 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc -p . && tsc -p webview",
-    "package": "node esbuild.mjs --production && vsce package --no-dependencies --out kvali-0.6.0.vsix",
+    "package": "node esbuild.mjs --production && vsce package --no-dependencies",
     "vscode:uninstall": "node ./dist/uninstall.js"
   },
   "devDependencies": {

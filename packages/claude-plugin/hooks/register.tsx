@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { KvAction, KvLive, KvPhase, KvTask } from '../types'
+import type { KvAction, KvLive, KvPhase, KvPlan, KvTask } from '../types'
 import {
   ASKS_PERSON,
   EMPTY_PLAN,
@@ -34,6 +34,7 @@ import {
   sortTasks,
   statusText,
   totalTokens,
+  turnSequence,
   typicalMs,
   type PhoneCfg,
   type PushKind,
@@ -45,6 +46,8 @@ const PANE = 'kvali'
 const TICK_MS = 2_000
 const PULSE_EVERY_MS = 10_000
 const LONG_TURN_MS = 120_000
+/** A question to the person is worth a push only after this long unanswered: sooner, they were at the computer. */
+const ASK_PUSH_AFTER_MS = 60_000
 /** `$.fs.read` copies at most 4 MiB into the plugin. */
 const MAX_TRANSCRIPT = 4 * 1024 * 1024
 
@@ -100,6 +103,17 @@ type Runtime = {
   pushedNeedsFor: number
   pushedStallFor: number
   lastStepPushAt: number
+  /** This turn's phone notification (an ntfy sequence ID): its progress updates and its end replace it. */
+  turnSeq: string | undefined
+  /** Tasks done when the last progress update went out, or when the turn began. */
+  progressSentDone: number
+  /** The tasks-done count last seen and since when: an update waits until it holds a moment. */
+  progressSeenDone: number
+  progressSeenAt: number
+  /** The phone followed this turn's progress, so its end is sent however short the turn was. */
+  progressSent: boolean
+  /** A turn that stopped in the middle of its plan: pushed once it has waited like a question. */
+  pendingPause: { at: number; workedMs: number; sequence?: string } | undefined
   /** Ask Claude for a plan while there is none (`autoPlan` in ~/.kvali/config.json). */
   autoPlan: boolean
 }
@@ -131,6 +145,12 @@ const fresh = (): Runtime => ({
   pushedNeedsFor: 0,
   pushedStallFor: 0,
   lastStepPushAt: 0,
+  turnSeq: undefined,
+  progressSentDone: 0,
+  progressSeenDone: 0,
+  progressSeenAt: 0,
+  progressSent: false,
+  pendingPause: undefined,
   autoPlan: true,
 })
 
@@ -175,7 +195,7 @@ async function doRefresh($: Engine, force: boolean): Promise<void> {
   }
   const l = derive(now)
   await loadPhone($, now)
-  if (l.phase === 'needs-you' && rt.pushedNeedsFor !== l.since) {
+  if (l.phase === 'needs-you' && rt.pushedNeedsFor !== l.since && now - l.since >= ASK_PUSH_AFTER_MS) {
     rt.pushedNeedsFor = l.since
     const asking = [...rt.running.values()].filter(r => r.asks).pop()
     quiet(push($, 'needs-you', { label: asking?.askPush ?? asking?.asks ?? l.label }))
@@ -183,18 +203,52 @@ async function doRefresh($: Engine, force: boolean): Promise<void> {
     rt.pushedStallFor = l.since
     quiet(push($, 'stalled', { quietMs: now - l.since }))
   }
+  if (rt.pendingPause && !rt.turnActive && now - rt.pendingPause.at >= ASK_PUSH_AFTER_MS) {
+    const { workedMs, sequence } = rt.pendingPause
+    rt.pendingPause = undefined
+    quiet(push($, 'paused', { workedMs, sequence }))
+  }
+  const current = await read($, plan)
+  if (progressDue(current, now)) quiet(push($, 'step', { sequence: turnSeq(now) }))
   const key = [l.phase, l.since, l.label ?? '', l.detail ?? ''].join('|')
   if (key !== rt.lastLiveKey || force) {
     rt.lastLiveKey = key
     await update($, live, () => l)
   }
   if (isActivePhase(l.phase)) $.ui.invalidate('ui.render')
-  const status = statusText(await read($, plan), l, now)
+  const status = statusText(current, l, now)
   if (status !== rt.lastStatus) {
     rt.lastStatus = status
     $.ui.status(status)
   }
   await pulse($, l, now, force)
+}
+
+/**
+ * Progress on the phone: the turn's notification shows the latest finished step, at most
+ * once a minute, so a step finished sooner goes out with the next refresh after that. A new
+ * count waits a moment first: Claude marks a task done and the next one in progress in two
+ * calls, and the update should name the next one.
+ */
+function progressDue(p: KvPlan, now: number): boolean {
+  const pr = progress(p.tasks)
+  if (pr.done < rt.progressSentDone) rt.progressSentDone = pr.done // a new plan
+  if (pr.done !== rt.progressSeenDone) {
+    rt.progressSeenDone = pr.done
+    rt.progressSeenAt = now
+  }
+  if (!rt.turnActive || !rt.phone?.events.includes('steps')) return false
+  if (pr.total === 0 || pr.done <= rt.progressSentDone || pr.done >= pr.total) return false
+  if (now - rt.lastStepPushAt < 60_000 || now - rt.progressSeenAt < 1_500) return false
+  rt.lastStepPushAt = now
+  rt.progressSentDone = pr.done
+  rt.progressSent = true
+  return true
+}
+
+function turnSeq(now: number): string {
+  rt.turnSeq ??= turnSequence(rt.sessionId, rt.turnStartedAt || now)
+  return rt.turnSeq
 }
 
 /**
@@ -305,12 +359,13 @@ const PUSH_EVENT: Record<PushKind, 'needs-you' | 'done' | 'error' | 'stuck' | 's
 }
 
 /** Sends one push to the phone; a failure only costs that push. */
-async function push($: Engine, kind: PushKind, extra: { label?: string; workedMs?: number; quietMs?: number } = {}): Promise<void> {
+async function push($: Engine, kind: PushKind, extra: { label?: string; workedMs?: number; quietMs?: number; sequence?: string } = {}): Promise<void> {
   const cfg = rt.phone
   if (!cfg || !cfg.events.includes(PUSH_EVENT[kind])) return
   const p = await read($, plan)
   const u = await read($, usage)
-  const body = ntfyBody(cfg, phonePush(kind, { project: rt.project, plan: p, tokens: totalTokens(u) || undefined, ...extra }, cfg.details))
+  const { sequence, ...info } = extra
+  const body = ntfyBody(cfg, { ...phonePush(kind, { project: rt.project, plan: p, tokens: totalTokens(u) || undefined, ...info }, cfg.details), sequence })
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (cfg.token) headers.Authorization = `Bearer ${cfg.token}`
   try {
@@ -368,6 +423,10 @@ export const register: Register = on => {
       rt.ended = undefined
       rt.stream = undefined
       rt.running.clear()
+      rt.turnSeq = turnSequence(rt.sessionId, now)
+      rt.progressSent = false
+      rt.pendingPause = undefined // the person answered
+      rt.progressSentDone = progress((await read($, plan)).tasks).done
       quiet(refresh($))
     }
     return next(e)
@@ -446,12 +505,6 @@ export const register: Register = on => {
       const current = await read($, plan)
       const tasks = files?.tasks ?? applyPlanTool(current.tasks, e.tool, input, ran.result)
       await update($, plan, p => advance(p, tasks, end, files?.times))
-      const before = progress(current.tasks).done
-      const after = progress(tasks).done
-      if (after > before && after < tasks.length && end - rt.lastStepPushAt >= 60_000) {
-        rt.lastStepPushAt = end
-        quiet(push($, 'step'))
-      }
     }
     await refresh($)
     return ran
@@ -497,11 +550,18 @@ export const register: Register = on => {
       lastTurnMs: e.durationMs,
       label: e.reason === 'refusal' ? 'the model declined' : e.reason === 'error' ? 'an API error ended the turn' : undefined,
     }
+    const sequence = rt.turnSeq
+    const followed = rt.progressSent
+    rt.turnSeq = undefined
+    rt.progressSent = false
     await refresh($, true)
-    if (phase === 'error') quiet(push($, 'error', { label: rt.ended.label }))
-    if (e.durationMs >= LONG_TURN_MS && phase === 'done') {
+    if (phase === 'error') quiet(push($, 'error', { label: rt.ended.label, sequence }))
+    // A turn the phone followed always gets its end; other turns only when they were long.
+    // A stop in the middle of the plan asks the person something, so it waits like a question.
+    if (phase === 'done' && (e.durationMs >= LONG_TURN_MS || followed)) {
       const pr = progress((await read($, plan)).tasks)
-      quiet(push($, pr.total > 0 && pr.done < pr.total ? 'paused' : 'finished', { workedMs: e.durationMs }))
+      if (pr.total > 0 && pr.done < pr.total) rt.pendingPause = { at: now, workedMs: e.durationMs, sequence }
+      else quiet(push($, 'finished', { workedMs: e.durationMs, sequence }))
     }
     if (e.durationMs >= LONG_TURN_MS && phase !== 'interrupted') {
       const p = progress((await read($, plan)).tasks)
@@ -517,6 +577,7 @@ export const register: Register = on => {
     rt.stream = undefined
     rt.running.clear()
     rt.ended = { phase: 'ended', since: await $.clock.now() }
+    rt.pendingPause = undefined
     await refresh($, true).catch(() => undefined)
     $.ui.status(undefined)
     return next(e)

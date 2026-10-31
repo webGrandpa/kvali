@@ -9,7 +9,6 @@
  *   kvali phone                notifications on your phone (ntfy)
  *   kvali watch                no dashboard: hooks and phone notifications only
  */
-import { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -41,9 +40,8 @@ import {
   fmtUsd,
   groupByProject,
   installClaudeHooks,
-  kvaliConfigFile,
   newPhoneConfig,
-  PushPlanner,
+  PhoneNotifier,
   qrTerminal,
   readPhoneConfig,
   sendPush,
@@ -57,7 +55,6 @@ import {
   todayUsage,
   uninstallClaudeHooks,
   type AgentSession,
-  type PhoneConfig,
   type Snapshot,
 } from '@kvali/core';
 
@@ -76,7 +73,8 @@ interface Options {
   server?: string;
   token?: string;
   private: boolean;
-  steps: boolean;
+  /** `--steps` / `--no-steps`: progress notifications on or off; unset keeps the setup's choice. */
+  steps: boolean | undefined;
 }
 
 function parse(argv: string[]): { cmd: string[]; opts: Options } {
@@ -90,7 +88,7 @@ function parse(argv: string[]): { cmd: string[]; opts: Options } {
     port: DEFAULT_HOOK_PORT,
     color: process.stdout.isTTY && !process.env.NO_COLOR,
     private: false,
-    steps: false,
+    steps: undefined,
   };
   const cmd: string[] = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -145,6 +143,9 @@ function parse(argv: string[]): { cmd: string[]; opts: Options } {
       case '--steps':
         opts.steps = true;
         break;
+      case '--no-steps':
+        opts.steps = false;
+        break;
       case '--version':
       case '-v':
         console.log(VERSION);
@@ -188,7 +189,7 @@ Options
   --port <n>                  hook hub port (default ${DEFAULT_HOOK_PORT})
   --no-hub                    do not listen for hook events (and send no phone notifications)
   --no-color
-  kvali phone options: --server <url> (self-hosted ntfy)  --token <token>  --private (no project or step names)  --steps (also each finished step)`;
+  kvali phone options: --server <url> (self-hosted ntfy)  --token <token>  --private (no project or step names)  --no-steps (no progress notifications)`;
 
 function fail(msg: string): never {
   console.error(`kvali: ${msg}`);
@@ -377,33 +378,19 @@ async function hooks(sub: string | undefined, opts: Options): Promise<void> {
 
 /**
  * Sends phone notifications while this process holds the hook port, so that with an editor
- * open too each event still reaches the phone once.
+ * open too each event still reaches the phone once. It looks on every snapshot and on its
+ * own clock: a finished task changes nothing the engine would publish.
  */
-function startPhone(engine: Engine, hub: HookHub | undefined, home: string, report: (line: string) => void): void {
-  const planner = new PushPlanner();
-  let cfg: PhoneConfig | undefined;
-  let mtime = -1;
-  let checked = 0;
-  engine.onSnapshot((snap) => {
-    void (async () => {
-      const now = Date.now();
-      if (now - checked >= 5_000) {
-        checked = now;
-        const m = (await fsp.stat(kvaliConfigFile(home)).catch(() => undefined))?.mtimeMs ?? 0;
-        if (m !== mtime) {
-          mtime = m;
-          cfg = await readPhoneConfig(home);
-        }
-      }
-      if (!cfg) return;
-      const pushes = planner.observe(snap, cfg);
-      if (!pushes.length || !hub?.isHub) return;
-      for (const p of pushes) {
-        const r = await sendPush(cfg, p);
-        report(r.ok ? `phone ← ${p.title}` : `phone: not sent (${r.error})`);
-      }
-    })();
+function startPhone(engine: Engine, hub: HookHub | undefined, home: string, report: (line: string) => void): PhoneNotifier {
+  const notifier = new PhoneNotifier({
+    home,
+    snapshot: () => engine.snapshot,
+    canSend: () => !!hub?.isHub,
+    report: (line, ok) => report(ok ? `phone ← ${line}` : `phone: not sent (${line})`),
   });
+  engine.onSnapshot(() => void notifier.tick());
+  notifier.start();
+  return notifier;
 }
 
 async function phone(sub: string | undefined, opts: Options): Promise<void> {
@@ -427,7 +414,8 @@ async function phone(sub: string | undefined, opts: Options): Promise<void> {
   if (opts.server) cfg.server = opts.server.replace(/\/+$/, '');
   if (opts.token) cfg.token = opts.token;
   if (opts.private) cfg.details = false;
-  if (opts.steps && !cfg.events.includes('steps')) cfg.events.push('steps');
+  if (opts.steps === true && !cfg.events.includes('steps')) cfg.events.push('steps');
+  if (opts.steps === false) cfg.events = cfg.events.filter((e) => e !== 'steps');
   await writePhoneConfig(opts.home, cfg);
   const self = cfg.server !== 'https://ntfy.sh';
   console.log(
@@ -448,7 +436,10 @@ async function phone(sub: string | undefined, opts: Options): Promise<void> {
   console.log(
     [
       '',
-      '  You get a notification when an agent needs you, finishes a long task, fails or goes quiet.',
+      '  You get an alert when an agent finishes, fails, goes quiet or has waited a minute for your answer.',
+      cfg.events.includes('steps')
+        ? '  Each task also gets one silent notification that its finished steps update (--no-steps turns it off).'
+        : '  Progress notifications are off (kvali phone --steps turns them on).',
       '  They are sent while Kvali runs: the editor extension, `kvali`, or `kvali watch` in the background.',
       "  Kvali's Claude Code plugin sends them for its own sessions by itself.",
       `  ${c.gray('Test: kvali phone test · Stop: kvali phone off')}`,

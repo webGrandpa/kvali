@@ -355,6 +355,9 @@ export type PhoneEvent = 'needs-you' | 'done' | 'error' | 'stuck' | 'steps'
 export type PhoneCfg = { server: string; topic: string; token?: string; events: PhoneEvent[]; details: boolean }
 const PHONE_EVENTS: readonly PhoneEvent[] = ['needs-you', 'done', 'error', 'stuck', 'steps']
 
+/** Kvali 0.5 saved this list as its default, before progress existed: it reads as today's default. */
+const DEFAULT_EVENTS_V1: readonly PhoneEvent[] = ['needs-you', 'done', 'error', 'stuck']
+
 /** The `phone` section of Kvali's config file, as the editor extension and the CLI write it. */
 export function parsePhoneConfig(text: string): PhoneCfg | undefined {
   let r: Record<string, unknown>
@@ -365,11 +368,14 @@ export function parsePhoneConfig(text: string): PhoneCfg | undefined {
   }
   if (typeof r.topic !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(r.topic)) return undefined
   const server = typeof r.server === 'string' && /^https?:\/\/[^\s/]/.test(r.server) ? r.server.replace(/\/+$/, '') : 'https://ntfy.sh'
-  const events = Array.isArray(r.events) ? r.events.filter((e): e is PhoneEvent => PHONE_EVENTS.includes(e as PhoneEvent)) : ['needs-you', 'done', 'error', 'stuck'] as PhoneEvent[]
+  let events = Array.isArray(r.events) ? r.events.filter((e): e is PhoneEvent => PHONE_EVENTS.includes(e as PhoneEvent)) : [...PHONE_EVENTS]
+  const v1Default = events.length === DEFAULT_EVENTS_V1.length && DEFAULT_EVENTS_V1.every(e => events.includes(e))
+  if (r.v === undefined && v1Default) events = [...PHONE_EVENTS]
   return { server, topic: r.topic, token: typeof r.token === 'string' && r.token ? r.token : undefined, events, details: r.details !== false }
 }
 
-export type PhonePush = { title: string; message: string; priority: 2 | 3 | 4; tags: string[] }
+/** `sequence`: the notification it replaces (ntfy's sequence ID), so a turn's progress and its end are one notification. */
+export type PhonePush = { title: string; message: string; priority: 2 | 3 | 4; tags: string[]; sequence?: string }
 export type PushKind = 'needs-you' | 'finished' | 'paused' | 'error' | 'stalled' | 'step'
 
 /** The words of a push, the same as the extension's. Without details no project or step names leave the computer. */
@@ -404,12 +410,27 @@ export function phonePush(
         tags: ['warning'],
       }
     case 'step':
-      return { title: `Claude Code${where} · ${p.done}/${p.total}`, message: details && step ? `Now: ${truncate(step, 120)}` : `${p.percent}% done`, priority: 2, tags: ['arrow_forward'] }
+    {
+      const next = step ? undefined : info.plan.tasks.find(t => t.status === 'pending')?.title
+      const line = details ? (step ? `Now: ${truncate(step, 120)}` : next ? `Next: ${truncate(next, 120)}` : undefined) : undefined
+      return { title: `Claude Code${where} · ${p.done}/${p.total}`, message: lines(`${phoneBar(p.done, p.total)} ${p.percent}%`, line), priority: 2, tags: ['arrow_forward'] }
+    }
   }
 }
 
 export function ntfyBody(cfg: PhoneCfg, push: PhonePush): string {
-  return JSON.stringify({ topic: cfg.topic, title: push.title, message: push.message, priority: push.priority, tags: push.tags })
+  return JSON.stringify({ topic: cfg.topic, title: push.title, message: push.message, priority: push.priority, tags: push.tags, ...(push.sequence ? { sequence_id: push.sequence } : {}) })
+}
+
+/** A text progress bar that reads on any phone, the same as the extension's: `███░░░░░░░`. */
+export function phoneBar(done: number, total: number, cells = 10): string {
+  const filled = total > 0 ? Math.min(cells, Math.round((done / total) * cells)) : 0
+  return `${'█'.repeat(filled)}${'░'.repeat(cells - filled)}`
+}
+
+/** The ntfy sequence ID of one turn's notification: letters, digits and `-` only. */
+export function turnSequence(sessionId: string, startedAt: number): string {
+  return `kvali-${sessionId.replace(/[^A-Za-z0-9]/g, '').slice(0, 12) || 'session'}-${Math.max(0, Math.floor(startedAt)).toString(36)}`
 }
 
 export const baseName = (p: string): string => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''

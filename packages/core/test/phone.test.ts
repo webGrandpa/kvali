@@ -5,9 +5,12 @@ import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { test } from 'node:test';
 import type { AgentSession, Snapshot, TaskItem } from '../src/model.ts';
+import { ClaudeCodeAdapter } from '../src/adapters/claude-code.ts';
 import {
   newTopic,
   ntfyRequest,
+  phoneBar,
+  PhoneNotifier,
   PushPlanner,
   readPhoneConfig,
   sendPush,
@@ -16,9 +19,10 @@ import {
   writePhoneConfig,
   type PhoneConfig,
   type PhoneEvent,
+  type PhonePush,
 } from '../src/phone.ts';
 import { qrMatrix, qrTerminal } from '../src/qr.ts';
-import { tmpHome, writeText } from './helpers.ts';
+import { Clock, appendJsonl, engineFor, tmpHome, writeJsonl, writeText } from './helpers.ts';
 
 const ALL: { events: PhoneEvent[]; details: boolean } = { events: ['needs-you', 'done', 'error', 'stuck', 'steps'], details: true };
 
@@ -63,6 +67,13 @@ test('phone setup: an unguessable topic, saved owner-only next to other settings
 
   writeText(file, JSON.stringify({ phone: { topic: 'bad topic/../x' } }));
   assert.equal(await readPhoneConfig(home), undefined, 'an invalid topic is ignored');
+
+  // Kvali 0.5's default (no progress) reads as today's default; a list saved since is kept as it is.
+  writeText(file, JSON.stringify({ phone: { topic: 'kvali-t', events: ['needs-you', 'done', 'error', 'stuck'] } }));
+  assert.deepEqual((await readPhoneConfig(home))?.events, ['needs-you', 'done', 'error', 'stuck', 'steps']);
+  await writePhoneConfig(home, { server: 'https://ntfy.sh', topic: 'kvali-t', events: ['needs-you', 'done', 'error', 'stuck'], details: true });
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).phone.v, 2);
+  assert.deepEqual((await readPhoneConfig(home))?.events, ['needs-you', 'done', 'error', 'stuck'], 'progress turned off stays off');
 });
 
 test('phone links and requests', () => {
@@ -72,6 +83,8 @@ test('phone links and requests', () => {
   assert.equal(req.url, 'https://ntfy.sh');
   assert.equal(req.headers.Authorization, 'Bearer tk_1');
   assert.deepEqual(JSON.parse(req.body), { topic: 'kvali-abc', title: 'Kvali is connected', message: testPush().message, priority: 3, tags: ['white_check_mark'] });
+  const update = ntfyRequest({ server: 'https://ntfy.sh', topic: 'kvali-abc', events: [], details: true }, { ...testPush(), sequence: 'kvali-1a2b-3c' });
+  assert.equal(JSON.parse(update.body).sequence_id, 'kvali-1a2b-3c', 'an update names the notification it replaces');
 });
 
 test('sendPush publishes JSON to the server and reports failures in words', async () => {
@@ -108,7 +121,7 @@ test('sendPush publishes JSON to the server and reports failures in words', asyn
   assert.match((down as { error: string }).error, /could not reach 127\.0\.0\.1:9/);
 });
 
-test('push planner: needs you, a long task finished, an error; nothing for short or interrupted work', () => {
+test('push planner: a question left a minute, a long task finished, an error; nothing for short or interrupted work', () => {
   let now = 1_000_000;
   const planner = new PushPlanner({ now: () => now });
   const kinds = (s: AgentSession) => planner.observe(snap(s), ALL).map((p) => p.title);
@@ -117,7 +130,16 @@ test('push planner: needs you, a long task finished, an error; nothing for short
   now += 1_000;
   assert.deepEqual(kinds(session({ status: 'working', updatedAt: now })), []);
   now += 1_000;
-  const ask = planner.observe(snap(session({ status: 'waiting', statusDetail: 'Needs approval: Bash', updatedAt: now })), ALL);
+  const question = session({ status: 'waiting', statusDetail: 'Needs approval: Bash', updatedAt: now });
+  assert.deepEqual(kinds(question), [], 'the person may be at the computer');
+  now += 8_000;
+  assert.deepEqual(kinds(session({ status: 'working', updatedAt: now })), [], 'answered within seconds: no push');
+  now += 1_000;
+  assert.deepEqual(kinds({ ...question, updatedAt: now }), []);
+  now += 59_000;
+  assert.deepEqual(kinds({ ...question, updatedAt: now - 59_000 }), []);
+  now += 1_000;
+  const ask = planner.observe(snap({ ...question, updatedAt: now - 60_000 }), ALL);
   assert.equal(ask[0]!.title, 'Claude Code needs you · storefront');
   assert.match(ask[0]!.message, /^Needs approval: Bash\nCheckout page with Stripe$/);
   assert.equal(ask[0]!.priority, 4);
@@ -129,7 +151,7 @@ test('push planner: needs you, a long task finished, an error; nothing for short
   now += 3_000;
   const done = planner.observe(snap(session({ status: 'done', updatedAt: now - 3_000, tasks: tasks(3, 3), tokens: { input: 1, output: 2, cacheRead: 3_000_000, cacheWrite: 0 } })), ALL);
   assert.equal(done[0]!.title, 'Claude Code finished · storefront');
-  assert.equal(done[0]!.message, 'Checkout page with Stripe\nDone in 4m 03s · 3/3 tasks · 3.00M tokens');
+  assert.equal(done[0]!.message, 'Checkout page with Stripe\nDone in 5m 12s · 3/3 tasks · 3.00M tokens');
 
   // Short work: no push. Interrupted: no push.
   now += 1_000;
@@ -152,6 +174,8 @@ test('push planner: needs you, a long task finished, an error; nothing for short
   now += 4 * 60_000;
   kinds(session({ status: 'idle', updatedAt: now, tasks: tasks(2, 4) }));
   now += 4_000;
+  assert.deepEqual(kinds(session({ status: 'idle', updatedAt: now, tasks: tasks(2, 4) })), [], 'a stop mid-plan waits like a question');
+  now += 60_000;
   const paused = planner.observe(snap(session({ status: 'idle', updatedAt: now, tasks: tasks(2, 4) })), ALL);
   assert.equal(paused[0]!.title, 'Claude Code stopped and is waiting for you · storefront');
   assert.equal(paused[0]!.message, 'Checkout page with Stripe\nStopped at 2/4 tasks · Step 3');
@@ -193,26 +217,127 @@ test('push planner: quiet, API trouble and a vanished agent, once each; plugin s
   assert.deepEqual(titles(gone), []);
 });
 
-test('push planner: steps are opt-in and spaced out; without details no names leave the computer', () => {
+test('push planner: progress is one notification per task, updated at most once a minute, replaced by its end', () => {
   let now = 9_000_000;
   const planner = new PushPlanner({ now: () => now });
   const quiet = { events: ['needs-you', 'done'] as PhoneEvent[], details: false };
   planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(0, 4) })), ALL);
   now += 1_000;
+  const marked = session({ status: 'working', updatedAt: now, tasks: tasks(1, 4).map((t) => (t.id === '2' ? { ...t, status: 'pending' as const } : t)) });
+  assert.deepEqual(planner.observe(snap(marked), ALL), [], 'a new count waits a moment: the next task is marked in progress right after');
+  now += 2_000;
   const step = planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(1, 4) })), ALL);
   assert.deepEqual(
     step.map((p) => [p.title, p.message, p.priority]),
-    [['Claude Code · storefront · 1/4', 'Now: Step 2', 2]],
+    [['Claude Code · storefront · 1/4', `${phoneBar(1, 4)} 25%\nNow: Step 2`, 2]],
   );
-  now += 10_000;
-  assert.deepEqual(planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(2, 4) })), ALL), [], 'at most one a minute');
-  assert.deepEqual(planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(2, 4) })), quiet), []);
+  const seq = step[0]!.sequence!;
+  assert.match(seq, /^kvali-[a-z0-9]+-[a-z0-9]+$/, 'a valid ntfy sequence ID');
+  assert.equal(phoneBar(1, 4), '███░░░░░░░');
 
+  now += 10_000;
+  const between = tasks(2, 4).map((t) => (t.id === '3' ? { ...t, status: 'pending' as const } : t));
+  assert.deepEqual(planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: between })), ALL), [], 'at most one a minute');
+  now += 60_000;
+  const later = planner.observe(snap(session({ status: 'working', updatedAt: now - 60_000, tasks: between })), ALL);
+  assert.deepEqual(
+    later.map((p) => [p.title, p.message, p.sequence]),
+    [['Claude Code · storefront · 2/4', `${phoneBar(2, 4)} 50%\nNext: Step 3`, seq]],
+    'the step finished in between goes out once the minute is over, with nothing new from the agent',
+  );
+
+  // The task's end replaces its progress notification, even though it took under two minutes.
+  now += 5_000;
+  planner.observe(snap(session({ status: 'done', updatedAt: now, tasks: tasks(4, 4) })), ALL);
+  now += 3_000;
+  const end = planner.observe(snap(session({ status: 'done', updatedAt: now - 3_000, tasks: tasks(4, 4) })), ALL);
+  assert.deepEqual(
+    end.map((p) => [p.title, p.sequence]),
+    [['Claude Code finished · storefront', seq]],
+  );
+
+  // The next task gets a notification of its own.
+  now += 60_000;
+  planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(0, 2) })), ALL);
   now += 1_000;
-  const ask = planner.observe(snap(session({ status: 'waiting', statusDetail: 'Needs approval: rm -rf secrets/', updatedAt: now, tasks: tasks(2, 4) })), quiet);
+  planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(1, 2) })), ALL);
+  now += 60_000;
+  const next = planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(1, 2) })), ALL);
+  assert.equal(next[0]!.title, 'Claude Code · storefront · 1/2', 'a new plan starts counting again');
+  assert.notEqual(next[0]!.sequence, seq);
+
+  assert.deepEqual(planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(1, 2) })), quiet), []);
+  now += 1_000;
+  const waiting = session({ status: 'waiting', statusDetail: 'Needs approval: rm -rf secrets/', updatedAt: now, tasks: tasks(1, 2) });
+  assert.deepEqual(planner.observe(snap(waiting), quiet), []);
+  now += 60_000;
+  const ask = planner.observe(snap(waiting), quiet);
   assert.equal(ask[0]!.title, 'Claude Code needs you');
-  assert.equal(ask[0]!.message, 'Waiting for your answer\n2/4 tasks');
+  assert.equal(ask[0]!.message, 'Waiting for your answer\n1/2 tasks');
+  assert.equal(ask[0]!.sequence, undefined, 'a question is a notification of its own');
   assert.doesNotMatch(JSON.stringify(ask), /storefront|Stripe|secrets|Step/);
+});
+
+test('PhoneNotifier: a finished turn reaches the phone though nothing changes after it', async () => {
+  const home = tmpHome();
+  const clock = new Clock('2026-10-30T10:00:00.000Z');
+  const SID = '7d1e2f3a-2222-4b5c-8d9e-0f1a2b3c4d5e';
+  const at = (ms: number) => ({ sessionId: SID, cwd: '/work/shop', version: '2.1.316', timestamp: clock.iso(ms) });
+  const usage = { input_tokens: 10, output_tokens: 200, cache_read_input_tokens: 5_000, cache_creation_input_tokens: 1_000 };
+  const reply = (ms: number, id: string, block: unknown, stop: string) => ({
+    ...at(ms),
+    type: 'assistant',
+    requestId: `req_${id}`,
+    uuid: id,
+    message: { id: `msg_${id}`, model: 'claude-opus-5-5', role: 'assistant', type: 'message', content: [block], stop_reason: stop, usage },
+  });
+  const file = path.join(home, '.claude', 'projects', '-work-shop', `${SID}.jsonl`);
+  writeJsonl(file, [
+    { ...at(0), type: 'user', origin: { kind: 'human' }, message: { role: 'user', content: 'Refactor the checkout page' } },
+    reply(1_000, 'a', { type: 'tool_use', id: 'tu_1', name: 'Bash', input: { command: 'pnpm test', description: 'Run the tests' } }, 'tool_use'),
+    { ...at(145_000), type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'ok' }] } },
+  ]);
+  // Set up by Kvali 0.5: the old default list, which now includes progress.
+  writeText(path.join(home, '.kvali', 'config.json'), JSON.stringify({ phone: { server: 'https://ntfy.example.com', topic: 'kvali-t', events: ['needs-you', 'done', 'error', 'stuck'], details: true } }));
+  clock.advance(150_000);
+
+  const engine = engineFor(new ClaudeCodeAdapter(), home, clock);
+  const sent: PhonePush[] = [];
+  const notifier = new PhoneNotifier({
+    home,
+    snapshot: () => engine.snapshot,
+    canSend: () => true,
+    planner: new PushPlanner({ now: clock.now }),
+    send: async (_cfg, p) => {
+      sent.push(p);
+      return { ok: true };
+    },
+  });
+  let published = 0;
+  engine.onSnapshot(() => {
+    published += 1;
+    void notifier.tick();
+  });
+
+  await engine.tick();
+  await notifier.tick();
+  assert.equal(engine.snapshot.sessions[0]!.status, 'working');
+  assert.deepEqual(notifier.config?.events, ['needs-you', 'done', 'error', 'stuck', 'steps']);
+
+  appendJsonl(file, [reply(150_000, 'b', { type: 'text', text: 'Done: the checkout page is refactored.' }, 'end_turn')]);
+  clock.advance(1_000);
+  await engine.tick();
+  await notifier.tick();
+  assert.equal(published, 2);
+  assert.equal(sent.length, 0, 'waits a moment: a queued prompt may follow');
+
+  clock.advance(5_000);
+  await engine.tick();
+  assert.equal(published, 2, 'nothing changed, so the engine publishes nothing');
+  await notifier.tick(); // what its clock does every few seconds
+  assert.deepEqual(sent.map((p) => p.title), ['Claude Code finished · shop']);
+  assert.match(sent[0]!.message, /\nDone in 2m 31s · /);
+  notifier.dispose();
 });
 
 test('QR codes: a matrix for the panel and half blocks for a terminal', () => {

@@ -45,3 +45,7 @@ To try it live, run `claude --plugin-dir packages/claude-plugin`: saving a file 
 ## Reporting a format change
 
 Agents change their files often. If Kvali shows wrong progress or tokens, open an issue with the agent name and version, what Kvali shows, what you expected, and a sanitized snippet of the relevant lines.
+
+## Releases
+
+See [RELEASING.md](RELEASING.md): one version tag publishes the extension, the CLI and the GitHub release.

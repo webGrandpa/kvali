@@ -6,6 +6,10 @@
 - **One connection per agent**: with the plugin on, Kvali removes its Claude Code hooks; they remain only as the fallback for a Claude Code that cannot load plugins. Existing setups move over by themselves.
 - Automatic planning lives in the plugin (it follows `kvali.autoPlan`). Turn Off and uninstalling remove the plugin too.
 - The CLI ships the plugin as well: `kvali setup` installs it.
+- Release automation: one version tag publishes to the VS Code Marketplace, Open VSX, npm (`npx @kvali/cli`) and a GitHub release (see RELEASING.md).
+- **Progress on your phone**, on by default: one silent notification per task with a progress bar and the current (or next) step, updated as steps finish, at most once a minute; when the task ends the same notification turns into "finished" or "stopped at 5/7" (ntfy updates it in place on Android; the iPhone app lists each update). The **Progress** switch in the phone card or `kvali phone --no-steps` turns it off. Setups saved by 0.5 get it too.
+- **A question reaches the phone only after a minute without an answer**, and so does a stop in the middle of a plan: answered at the computer, it sends nothing. Before, every permission prompt was a high-priority push.
+- **Fixed: only the test notification reached the phone.** "Finished", "went quiet" and "API trouble" are about time passing, but the editor and `kvali watch` looked for them only when an agent's data changed, which after a finished task it no longer does. They now look every few seconds as well (and never act on an older snapshot after a newer one).
 
 ## 0.5.1 — 2026-10-31
 

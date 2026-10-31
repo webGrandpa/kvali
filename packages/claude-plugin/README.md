@@ -13,7 +13,7 @@ It works wherever Claude Code runs: the terminal, the desktop app, the VS Code e
 
 ## On your phone
 
-With phone notifications set up (`kvali phone` or **Kvali: Send Notifications to My Phone** in the editor), the plugin sends this session's pushes through ntfy by itself, no editor needed: Claude needs you, a turn of two minutes or more finished (or stopped mid-plan), an error, or no data from the API. It reads the shared setup in `~/.kvali/config.json` once a minute.
+With phone notifications set up (`kvali phone` or **Kvali: Send Notifications to My Phone** in the editor), the plugin sends this session's pushes through ntfy by itself, no editor needed: the turn's progress through its plan as one silent notification that each finished step updates (at most once a minute) and the turn's end replaces, and alerts when a question has waited a minute for your answer (one answered at the computer sends nothing), a turn of two minutes or more (or one whose progress you followed) finished, or stopped mid-plan and waited a minute, an error, or no data from the API. It reads the shared setup in `~/.kvali/config.json` once a minute.
 
 ## With the Kvali editor extension
 
@@ -22,7 +22,7 @@ The plugin also writes a small heartbeat file per session to `~/.kvali/live/clau
 ## Install
 
 - **With Kvali's editor extension** (VS Code, Antigravity, Cursor, Windsurf): click **Turn on** in the Kvali view. Kvali installs this plugin with Claude Code's own command and keeps it updated.
-- **With Kvali's CLI**: `npx kvali setup`.
+- **With Kvali's CLI**: `npx @kvali/cli setup`.
 - **On its own**, at the prompt of a terminal Claude Code session: `/plugin install kvali --marketplace webGrandpa/kvali` (from a shell: `claude plugin install kvali --marketplace webGrandpa/kvali`). In the desktop app: click + next to the prompt box, then Plugins, Add marketplace with `webGrandpa/kvali`, then Add plugin.
 
 Then start a new Claude Code session (or run `/reload-plugins`).

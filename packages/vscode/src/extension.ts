@@ -32,6 +32,7 @@ import {
   type AgentSession,
   type DetectedAgents,
   type HookStatus,
+  type PhoneEvent,
   type SetupOptions,
   type Snapshot,
 } from '@kvali/core';
@@ -108,7 +109,7 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
     },
   });
 
-  const phone = new PhoneSender(home, () => hub.isHub, log);
+  const phone = new PhoneSender(home, () => engine.snapshot, () => hub.isHub, log);
   let phoneCard = false;
 
   const view = new AgentsView(context.extensionUri, (m) => void onMessage(m));
@@ -148,7 +149,7 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
     refreshStatusBar();
     notifier.update(snap);
     const hadPhone = !!phone.config;
-    void phone.update(snap).then(() => {
+    void phone.update().then(() => {
       if (!!phone.config !== hadPhone) pushState();
     });
     pushState();
@@ -353,6 +354,15 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
         phoneCard = true;
         pushState();
         return;
+      case 'phoneProgress': {
+        const cfg = await readPhoneConfig(home);
+        if (!cfg) return;
+        const events: PhoneEvent[] = m.on ? [...cfg.events.filter((e) => e !== 'steps'), 'steps'] : cfg.events.filter((e) => e !== 'steps');
+        await writePhoneConfig(home, { ...cfg, events });
+        await phone.reload(true);
+        pushState();
+        return;
+      }
       default:
         return;
     }
@@ -496,6 +506,7 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
     { dispose: () => hub.dispose() },
     { dispose: () => windows.dispose() },
     { dispose: () => notifier.dispose() },
+    { dispose: () => phone.dispose() },
   );
 
   // Time-based labels in the status bar ("done" fades after 30 minutes).
@@ -505,6 +516,7 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
   windows.start();
   hub.start();
   engine.start();
+  phone.start();
   refreshStatusBar();
   void repairSetup().then(() => offerSetup());
   log.info(`Kvali started (home ${home}, ${roots().length} workspace folder(s))`);

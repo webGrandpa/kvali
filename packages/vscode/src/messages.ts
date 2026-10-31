@@ -49,6 +49,7 @@ export type FromWebview =
   | { type: 'copy'; text: string }
   | { type: 'hidePhoneCard' }
   | { type: 'showPhoneCard' }
+  | { type: 'phoneProgress'; on: boolean }
   | {
       type: 'command';
       command:

@@ -24,6 +24,8 @@ jobs:
       - run: pnpm build
       - run: pnpm package
         if: matrix.os == 'ubuntu-latest'
+      - run: node scripts/pack-cli.mjs
+        if: matrix.os == 'ubuntu-latest'
       - uses: actions/upload-artifact@v4
         if: matrix.os == 'ubuntu-latest'
         with:

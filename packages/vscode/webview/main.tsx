@@ -489,13 +489,13 @@ function Qr({ text, size = 168 }: { text: string; size?: number }) {
   );
 }
 
-const PHONE_EVENT_LABEL: Record<string, string> = {
-  'needs-you': 'needs you',
-  done: 'finished a long task',
-  error: 'failed',
-  stuck: 'went quiet or stopped responding',
-  steps: 'finished a step',
-};
+/** In the order the sentence reads best. */
+const PHONE_ALERT_LABEL: [string, string][] = [
+  ['done', 'finishes'],
+  ['error', 'fails'],
+  ['stuck', 'goes silent'],
+  ['needs-you', 'has waited a minute for your answer'],
+];
 
 function PhoneCard({ phone }: { phone: PhoneView }) {
   const ref = useRef<HTMLElement>(null);
@@ -503,7 +503,8 @@ function PhoneCard({ phone }: { phone: PhoneView }) {
   useEffect(() => {
     ref.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, []);
-  const events = phone.events.map((e) => PHONE_EVENT_LABEL[e] ?? e);
+  const alerts = PHONE_ALERT_LABEL.filter(([e]) => phone.events.includes(e as PhoneView['events'][number])).map(([, label]) => label);
+  const progress = phone.events.includes('steps');
   const self = !/^https:\/\/ntfy\.sh$/.test(phone.server);
   return (
     <aside class="setup phone" aria-label="Phone notifications" ref={ref}>
@@ -527,8 +528,14 @@ function PhoneCard({ phone }: { phone: PhoneView }) {
           Copy
         </button>
       </p>
+      <label class="phone-progress">
+        <input type="checkbox" checked={progress} onChange={(e) => post({ type: 'phoneProgress', on: (e.currentTarget as HTMLInputElement).checked })} />
+        <span>
+          <b>Progress</b>: a silent notification per task that each finished step updates (on an iPhone each update is listed)
+        </span>
+      </label>
       <p class="muted small">
-        You get a notification when an agent {events.length > 1 ? `${events.slice(0, -1).join(', ')} or ${events.at(-1)}` : events[0]}. The topic name is the key: keep it to yourself.
+        {alerts.length ? `An alert when an agent ${alerts.length > 1 ? `${alerts.slice(0, -1).join(', ')} or ${alerts.at(-1)}` : alerts[0]}. ` : ''}The topic name is the key: keep it to yourself.
         {phone.details ? ' Notifications name the project and the step; never code or prompts.' : ' Notifications leave out project and step names.'}
       </p>
       <div class="setup-actions">
