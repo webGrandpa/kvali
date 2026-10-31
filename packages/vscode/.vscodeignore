@@ -1,5 +1,6 @@
 **
 !dist/extension.js
+!dist/uninstall.js
 !dist/webview/main.js
 !dist/webview/main.css
 !media/icon.png

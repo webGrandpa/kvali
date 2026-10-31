@@ -9,7 +9,7 @@
 - **Progress to 100%** from the agent's own plan (Claude Code Tasks, Codex `update_plan`, Gemini `write_todos`, Antigravity `task.md`, or the [progress protocol](https://github.com/webGrandpa/kvali/blob/main/docs/PROTOCOL.md)).
 - **What it is doing right now**: the step, the tool or command, and for how long.
 - **Needs you**: permission prompts and questions in the status bar and as notifications, including OS notifications when the editor is in the background.
-- **Tokens and cost** per session, project and day, with context-window usage. Anthropic prices are built in; set `kvali.pricing` for other models.
+- **Tokens and API value** per session, project and day, with context-window usage. Anthropic prices are built in; set `kvali.pricing` for other models.
 - **Plan limits**: 5-hour and weekly usage for Codex subscriptions.
 - **All projects in one place**, this workspace first. **Resume** a finished Claude Code or Codex session in a terminal with one click.
 
@@ -28,7 +28,6 @@ Everything is local and read-only. Kvali never sends your data anywhere.
 ## Getting started
 
 1. Open the **Kvali** view from the activity bar. Sessions from the last 24 hours appear automatically.
-2. Run **Kvali: Add Progress Protocol to AGENTS.md** in each repository so every agent keeps its plan visible.
-3. Claude Code users: run **Kvali: Install Claude Code Hooks** for an exact "Needs you" status.
+2. Click **Turn on** once. Kvali enables "needs you" alerts and automatic plans for every agent it finds (Claude Code hooks, a short planning rule for Codex and Gemini/Antigravity). All of it is marked, reversible with **Kvali: Turn Off**, and removed automatically when you uninstall Kvali.
 
 Full documentation, the terminal dashboard and the source are on [GitHub](https://github.com/webGrandpa/kvali).

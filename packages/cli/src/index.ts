@@ -20,7 +20,13 @@ import {
   HookHub,
   ProgressFileAdapter,
   STATUS_LABEL,
+  addGlobalPlanRule,
   addProgressProtocol,
+  applySetup,
+  claudeHookReply,
+  detectAgents,
+  removeSetup,
+  setupChanges,
   claudeHooksStatus,
   claudeSettingsPath,
   currentTask,
@@ -40,7 +46,7 @@ import {
   type Snapshot,
 } from '@kvali/core';
 
-const VERSION = '0.1.0';
+const VERSION = '0.3.0';
 
 interface Options {
   json: boolean;
@@ -129,10 +135,13 @@ Usage
   kvali                       live dashboard (q or Ctrl+C to quit)
   kvali --once                print the dashboard once
   kvali --json                print one snapshot as JSON
-  kvali hooks install         install Claude Code hooks (exact "needs approval" status)
+  kvali setup                 one-step setup: alerts + automatic plans for every agent found
+  kvali setup off             undo it
+  kvali hooks install         install only the Claude Code hooks
   kvali hooks uninstall       remove them
   kvali hooks status
   kvali protocol [dir]        add the progress protocol to <dir>/AGENTS.md
+  kvali plan-rule             ask every installed agent to always keep a plan (global)
 
 Options
   -p, --project <dir>         only sessions inside <dir>      --here   same, for the current directory
@@ -233,7 +242,7 @@ export function render(snap: Snapshot, opts: Options, width = process.stdout.col
   const w = Math.max(60, Math.min(width, 160));
 
   lines.push(
-    `${c.bold('kvali')} ${c.gray(`· ${sessions.length} session${sessions.length === 1 ? '' : 's'} · today ${fmtTokens(today.tokens)} tokens${today.priced ? ` · ≈${fmtUsd(today.costUsd)}` : ''}`)}`,
+    `${c.bold('kvali')} ${c.gray(`· ${sessions.length} session${sessions.length === 1 ? '' : 's'} · today ${fmtTokens(today.tokens)} tokens${today.priced ? ` · API value ${fmtUsd(today.costUsd)}` : ''}`)}`,
   );
 
   const limits = new Map<string, AgentSession>();
@@ -257,11 +266,15 @@ export function render(snap: Snapshot, opts: Options, width = process.stdout.col
   const barWidth = 14;
   for (const g of groupByProject(sessions, roots, now)) {
     lines.push('');
-    const usage = g.today.tokens ? c.gray(`  today ${fmtTokens(g.today.tokens)}${g.today.costUsd ? ` · ≈${fmtUsd(g.today.costUsd)}` : ''}`) : '';
+    const usage = g.today.tokens ? c.gray(`  today ${fmtTokens(g.today.tokens)}${g.today.costUsd ? ` · API value ${fmtUsd(g.today.costUsd)}` : ''}`) : '';
     lines.push(`${c.bold(c.inverse(` ${g.name} `))}${c.gray(g.path ? `  ${g.path.replace(os.homedir(), '~')}` : '')}${usage}`);
     for (const s of g.sessions) {
       const p = progressOf(s.tasks);
-      const prog = p.total ? `${bar(p.done, p.inProgress, p.total, barWidth, c)} ${String(p.done).padStart(2)}/${p.total} ${String(p.percent).padStart(3)}%` : c.gray('no plan'.padEnd(barWidth + 10));
+      const prog = p.total
+        ? `${bar(p.done, p.inProgress, p.total, barWidth, c)} ${String(p.done).padStart(2)}/${p.total} ${String(p.percent).padStart(3)}%`
+        : s.status === 'working' && s.turn
+          ? `${c.cyan('~'.repeat(barWidth))} ${`${s.turn.steps} steps`.padEnd(9)}`
+          : c.gray('no plan'.padEnd(barWidth + 10));
       const head = `${statusTag(s, c)} ${agentTag(s, c)} `;
       const titleWidth = Math.max(10, w - visible(head) - visible(prog) - 2);
       lines.push(`${head}${fit(c.bold(s.title), titleWidth)} ${prog}`);
@@ -279,7 +292,7 @@ export function render(snap: Snapshot, opts: Options, width = process.stdout.col
       const meta: string[] = [];
       const tok = sessionTokens(s);
       if (tok !== undefined) meta.push(`${fmtTokens(tok)} tok`);
-      if (s.costUsd !== undefined) meta.push(`≈${fmtUsd(s.costUsd)}`);
+      if (s.costUsd !== undefined) meta.push(`API value ${fmtUsd(s.costUsd)}`);
       if (s.context?.window) meta.push(`ctx ${Math.round((s.context.used / s.context.window) * 100)}%`);
       if (s.activeSubagents) meta.push(`${s.activeSubagents} subagent${s.activeSubagents > 1 ? 's' : ''}`);
       const metaStr = c.gray(meta.join(' · '));
@@ -327,9 +340,32 @@ async function hooks(sub: string | undefined, opts: Options): Promise<void> {
 async function main(): Promise<void> {
   const { cmd, opts } = parse(process.argv.slice(2));
   if (cmd[0] === 'hooks') return hooks(cmd[1], opts);
+  if (cmd[0] === 'setup') {
+    if (cmd[1] === 'off') {
+      await removeSetup(opts.home, process.env);
+      console.log('Removed Kvali hooks and planning rules.');
+      return;
+    }
+    const d = await detectAgents(opts.home, process.env);
+    const changes = setupChanges(d);
+    if (!changes.length) fail('no supported agent found (~/.claude, ~/.codex, ~/.gemini)');
+    await applySetup(opts.home, process.env, opts.port, d);
+    console.log(['Kvali is on:', ...changes.map((c) => `  • ${c}`), 'Undo with `kvali setup off`.'].join('\n'));
+    return;
+  }
+  if (cmd[0] === 'plan-rule') {
+    for (const r of await addGlobalPlanRule(opts.home, process.env)) console.log(`${r.agent}: ${r.result} (${r.file})`);
+    return;
+  }
   if (cmd[0] === 'protocol') {
     const r = await addProgressProtocol(path.resolve(cmd[1] ?? '.'));
-    console.log(r.result === 'exists' ? `${r.file} already has the progress protocol.` : `${r.result === 'created' ? 'Created' : 'Updated'} ${r.file}.`);
+    const said = {
+      created: `Created ${r.file} with the progress protocol.`,
+      added: `Added the progress protocol to ${r.file}.`,
+      updated: `Updated the progress protocol in ${r.file} to the current version.`,
+      exists: `${r.file} already has the current progress protocol.`,
+    };
+    console.log(said[r.result]);
     return;
   }
   if (cmd.length) fail(`unknown command "${cmd[0]}" (see --help)`);
@@ -341,7 +377,14 @@ async function main(): Promise<void> {
     return;
   }
 
-  const hub = opts.hub ? new HookHub({ port: opts.port, liveDir: defaultLiveDir(opts.home) }) : undefined;
+  const hub = opts.hub
+    ? new HookHub({
+        port: opts.port,
+        liveDir: defaultLiveDir(opts.home),
+        respond: (agent, ev) =>
+          agent === 'claude-code' ? claudeHookReply(ev, engine.snapshot.sessions.find((x) => x.agent === 'claude-code' && x.id === ev.sessionId)) : undefined,
+      })
+    : undefined;
   hub?.start();
   const out = process.stdout;
   out.write(`${ESC}?1049h${ESC}?25l`);

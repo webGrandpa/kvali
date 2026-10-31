@@ -12,6 +12,7 @@ export interface KvaliConfig {
   notifyNeedsInput: boolean;
   notifySystem: boolean;
   showCost: boolean;
+  autoPlan: boolean;
   pricing: Record<string, Partial<ModelPrice>>;
   disabled: AgentId[];
   brainDirs: string[];
@@ -30,6 +31,7 @@ export function readConfig(): KvaliConfig {
     notifyNeedsInput: c.get<boolean>('notifications.onNeedsInput', true),
     notifySystem: c.get<boolean>('notifications.system', true),
     showCost: c.get<boolean>('cost.show', true),
+    autoPlan: c.get<boolean>('autoPlan', true),
     pricing: c.get<Record<string, Partial<ModelPrice>>>('pricing', {}),
     disabled: c.get<AgentId[]>('agents.disabled', []),
     brainDirs: c.get<string[]>('antigravity.brainDirs', []),

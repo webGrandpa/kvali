@@ -16,9 +16,10 @@ Live task progress, the current step, tokens, cost and plan limits for Claude Co
 Long agent runs are a black box. You either babysit the chat or keep asking for a status update, which costs tokens and breaks the agent's flow. Meanwhile, every agent already writes everything Kvali needs to your disk: its plan, the tool it is running, and the tokens it spent. Kvali turns that into:
 
 - **Progress to 100%**: the agent's own plan (Claude Code Tasks, Codex `update_plan`, Gemini `write_todos`, Antigravity `task.md`) as a progress bar with the step it is on.
-- **What it is doing right now**: "Running `pnpm test` · 41s", "Editing `src/app.tsx`".
+- **What it is doing right now**: "Running `pnpm test` · 41s", "Editing `src/app.tsx`", the last few actions, and how long the current step is taking compared with the earlier ones ("4m of ~6m").
+- **Stuck or working?** Each working agent shows whether it is active, waiting for a long command, retrying after a connection/API error, or silent with nothing running.
 - **Needs you**: permission prompts and questions surface in the status bar and as notifications, including OS notifications when the editor is in the background.
-- **Tokens and cost**: per session, per project and per day, with input, output, cache and context usage. Cost is estimated at API list prices (built in for Anthropic models, configurable for others).
+- **Tokens and API value**: per session, per project and per day, with input, output, cache and context usage. API value is what the tokens would cost at list prices (built in for Anthropic models, configurable for others); subscriptions are not billed per token.
 - **Plan limits**: 5-hour and weekly usage for Codex subscriptions, straight from Codex's own logs.
 - **Every project at once**: sessions are grouped by project; the current workspace comes first.
 
@@ -43,9 +44,9 @@ Want another agent? Adapters are small; see [docs/ADAPTERS.md](docs/ADAPTERS.md)
 **Editor extension** (VS Code ≥ 1.90, Antigravity, Cursor, Windsurf, VSCodium):
 
 - From a release: download `kvali-x.y.z.vsix`, then run **Extensions: Install from VSIX…** from the Command Palette (or `code --install-extension kvali-x.y.z.vsix`).
-- From source: `pnpm install && pnpm package`, which writes `packages/vscode/kvali-0.1.0.vsix`.
+- From source: `pnpm install && pnpm package`, which writes `packages/vscode/kvali-0.3.0.vsix`.
 
-Open the **Kvali** icon in the activity bar. Sessions from the last 24 hours appear automatically.
+Open the **Kvali** icon in the activity bar and click **Turn on** once. That is the whole setup: Kvali finds the agents on your machine, turns on "needs you" alerts and makes every agent keep a plan, so each task gets a real progress bar. Sessions from the last 24 hours appear automatically.
 
 **Terminal** (any editor, including JetBrains):
 
@@ -56,24 +57,38 @@ node packages/cli/dist/kvali.mjs --here   # only this project
 node packages/cli/dist/kvali.mjs --json   # one snapshot as JSON, for scripts
 ```
 
-## Get the most out of it
+## What "Turn on" does
 
-1. **Let agents keep a plan.** Progress is only as good as the agent's plan. Run **Kvali: Add Progress Protocol to AGENTS.md** once per repository. Agents with a built-in plan tool are told to use it for every multi-step task; all other agents are told to keep `.agents/progress.md` up to date ([format](docs/PROTOCOL.md)).
-2. **Claude Code users: install the hooks** for an exact "Needs you" status (button in the view, or **Kvali: Install Claude Code Hooks**).
-3. **Codex / Gemini on API keys: add prices** in `kvali.pricing` to see cost (tokens are always shown).
+One consent, everything marked and reversible (also `kvali setup` / `kvali setup off` in a terminal):
+
+| Agent found | Change | Why |
+| --- | --- | --- |
+| Claude Code | 4 hooks in `~/.claude/settings.json` | Exact "Needs you" status; while a session has no unfinished plan, the prompt hook asks Claude to keep a task list (~60 tokens, only then) |
+| Codex | a 4-line rule in `~/.codex/AGENTS.md` | Codex keeps an `update_plan` list for multi-step work |
+| Gemini CLI / Antigravity | the same rule in `~/.gemini/GEMINI.md` | `write_todos` / `task.md` for multi-step work |
+
+- Your own settings and text are never changed; Kvali only adds its marked entries.
+- Kvali keeps them current after updates, and **uninstalling the extension removes all of them** automatically.
+- **Kvali: Turn Off** removes them while keeping the extension.
+- Without a plan (before the agent writes one, or with setup off) Kvali still shows an indeterminate bar with the steps taken this turn.
+- Agents Kvali cannot configure (Cursor, Copilot, …): run **Kvali: Add Progress Protocol to AGENTS.md** in a repository.
+- Codex / Gemini on API keys: add prices in `kvali.pricing` to see their API value (tokens are always shown).
 
 ## Claude Code hooks
 
-**Kvali: Install Claude Code Hooks** adds four `async` command hooks to `~/.claude/settings.json` for `UserPromptSubmit`, `Notification`, `Stop` and `SessionEnd`:
+The hooks are plain `curl` commands that send the event JSON to Kvali on `127.0.0.1:47821` (bypassing any HTTP proxy) and always exit 0:
 
 ```bash
-curl -s -m 2 -o /dev/null -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:47821/v1/events/claude-code || true
+# UserPromptSubmit (synchronous, capped at 1 s, usually a few ms): may print Kvali's planning reminder
+curl -s --noproxy '*' -m 1 --connect-timeout 0.3 -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:47821/v1/events/claude-code || true
+# Notification, Stop, SessionEnd (async, fire and forget)
+curl -s --noproxy '*' -m 2 -o /dev/null -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:47821/v1/events/claude-code || true
 ```
 
-- They run in the background and always exit 0, so they never slow down or block Claude Code, even when no editor is open.
+- When no editor with Kvali is running, nothing answers and Claude Code continues as if the hooks did not exist.
+- Kvali stores only the event name, session id, notification type and message in `~/.kvali/live/`. Prompts, tool inputs and code are never stored. The planning reminder is a fixed text and never contains anything from your prompt.
 - Claude Code reports when a permission prompt appears, but not the moment you approve it. Kvali clears "Needs you" as soon as the transcript moves on, so a long command you approved may show "Needs you" until it finishes.
-- The editor window that owns port 47821 (any Kvali window, or the `kvali` CLI) stores only the event name, session id, notification type and message in `~/.kvali/live/`. Prompts, tool inputs and code are never stored.
-- Your existing settings and hooks are kept, and the previous file is saved as `settings.json.kvali-backup`. **Kvali: Remove Claude Code Hooks** (or `kvali hooks uninstall`) takes them out again.
+- Set `kvali.autoPlan` to `false` to keep the alerts but stop the planning reminder.
 
 ## Settings
 
@@ -86,7 +101,8 @@ curl -s -m 2 -o /dev/null -H 'Content-Type: application/json' --data-binary @- h
 | `kvali.notifications.onNeedsInput` | `true` | Notify when an agent needs you |
 | `kvali.notifications.system` | `true` | Also use macOS / Linux notifications when the editor is in the background |
 | `kvali.statusBar.enabled` | `true` | Status bar item for this workspace |
-| `kvali.cost.show` | `true` | Show estimated cost |
+| `kvali.autoPlan` | `true` | Remind Claude Code to keep a plan while a session has none |
+| `kvali.cost.show` | `true` | Show API value (what the tokens would cost at API list prices) |
 | `kvali.pricing` | `{}` | Prices in USD per million tokens, e.g. `{ "gpt-5.5*": { "input": 1.25, "output": 10, "cacheRead": 0.125 } }` |
 | `kvali.agents.disabled` | `[]` | Agents Kvali should not read |
 | `kvali.antigravity.brainDirs` | `[]` | Extra Antigravity data folders |

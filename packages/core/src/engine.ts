@@ -8,6 +8,7 @@ import { GeminiCliAdapter } from './adapters/gemini-cli.ts';
 import { ProgressFileAdapter } from './adapters/progress-file.ts';
 import type { AgentId, AgentSession, Snapshot } from './model.ts';
 import { STATUS_PRIORITY } from './model.ts';
+import { pathWithin } from './format.ts';
 import { Pricing } from './pricing.ts';
 
 export interface EngineOptions {
@@ -40,6 +41,39 @@ export function createDefaultAdapters(opts: Pick<EngineOptions, 'extraAntigravit
     new AntigravityAdapter(opts.extraAntigravityBrainDirs),
     new ProgressFileAdapter(),
   ];
+}
+
+const sameProject = (a?: string, b?: string) => !!a && !!b && (pathWithin(a, b) || pathWithin(b, a));
+
+/**
+ * An agent that Kvali reads natively sometimes also writes `.agents/progress.md`.
+ * Show one card: the native session (live activity, tokens), borrowing the file's plan
+ * only when the agent keeps no plan of its own.
+ */
+export function mergeProgressFiles(sessions: AgentSession[]): AgentSession[] {
+  const native = sessions.filter((s) => s.agent !== 'progress-file');
+  const out = [...native];
+  for (const pf of sessions) {
+    if (pf.agent !== 'progress-file') continue;
+    const label = pf.agentLabel.toLowerCase();
+    const match = native
+      .filter((n) => {
+        const name = n.agentLabel.toLowerCase();
+        const short = name.split(' ')[0];
+        return (label.includes(short) || name.includes(label)) && sameProject(n.projectPath, pf.projectPath);
+      })
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    if (!match) {
+      out.push(pf);
+      continue;
+    }
+    if (match.tasks.length === 0 && pf.tasks.length > 0) {
+      match.tasks = pf.tasks;
+      match.current ??= pf.current;
+    }
+    match.sources = [...match.sources, ...pf.sources];
+  }
+  return out;
 }
 
 export function sortSessions(sessions: AgentSession[]): AgentSession[] {
@@ -150,11 +184,12 @@ export class Engine {
           this.ctx.log(`[${a.id}] ${message}`);
         }
       }
-      sortSessions(sessions);
-      const signature = JSON.stringify([sessions, errors]);
+      const merged = mergeProgressFiles(sessions);
+      sortSessions(merged);
+      const signature = JSON.stringify([merged, errors]);
       if (signature !== this.lastSignature) {
         this.lastSignature = signature;
-        this.current = { generatedAt: this.ctx.now(), sessions, errors };
+        this.current = { generatedAt: this.ctx.now(), sessions: merged, errors };
         for (const l of this.listeners) {
           try {
             l(this.current);

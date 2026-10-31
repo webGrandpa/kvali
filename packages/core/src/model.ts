@@ -67,6 +67,8 @@ export interface Activity {
   detail?: string;
   /** Epoch milliseconds. */
   startedAt: number;
+  /** When the action finished; undefined while it runs. */
+  endedAt?: number;
 }
 
 export interface DailyUsage {
@@ -86,6 +88,8 @@ export interface AgentSession {
   /** The directory the agent was started in, when it differs from `projectPath` (used to resume sessions). */
   cwd?: string;
   model?: string;
+  /** Version of the agent that wrote the session, when recorded (helps diagnose format changes). */
+  agentVersion?: string;
   status: SessionStatus;
   /** Why the session is in its status, e.g. "Needs approval: Bash". */
   statusDetail?: string;
@@ -95,6 +99,14 @@ export interface AgentSession {
   updatedAt: number;
   tasks: TaskItem[];
   activity?: Activity;
+  /** The current (or last) turn: tool calls since the user's last prompt. A progress signal even without a plan. */
+  turn?: { steps: number; startedAt: number };
+  /** The task in progress: when it started, actions taken on it, and the plan's typical task duration. */
+  current?: { taskId: string; startedAt: number; steps: number; typicalMs?: number };
+  /** The agent's latest actions, newest first. */
+  recent?: Activity[];
+  /** Set while the agent reports an API or connection problem, e.g. while retrying. */
+  trouble?: { message: string; at: number; attempt?: number; maxAttempts?: number };
   /** `undefined` means the agent does not expose token usage locally. */
   tokens?: TokenUsage;
   /** Estimated cost at API list prices. `undefined` when pricing is unknown. */

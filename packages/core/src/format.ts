@@ -131,6 +131,11 @@ export function sessionTokens(s: AgentSession): number | undefined {
   return s.tokens ? totalTokens(s.tokens) : undefined;
 }
 
+/** Tokens the session used today (local time), or `undefined` when unknown. */
+export function sessionTodayTokens(s: AgentSession, now: number): number | undefined {
+  return s.daily?.[dayKeyLocal(now)]?.tokens;
+}
+
 function dayKeyLocal(ms: number): string {
   const d = new Date(ms);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;

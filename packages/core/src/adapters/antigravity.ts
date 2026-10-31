@@ -21,6 +21,7 @@ import { parseChecklist } from '../util/checklist.ts';
 import { findGitRoot, isWithin, listDir, readJsonSafe, readTextSafe, statSafe } from '../util/fs.ts';
 import { JsonlTail } from '../util/jsonl.ts';
 import { firstLine, truncate } from '../util/text.ts';
+import { TaskTimer } from '../util/task-timer.ts';
 import { parseTime } from '../util/time.ts';
 
 const ASK_TOOLS = new Set(['ask_permission', 'ask_question', 'request_feedback', 'notify_user']);
@@ -61,6 +62,10 @@ interface AgState {
   projectVotesAt: number;
   task?: { mtimeMs: number; title?: string; tasks: TaskItem[]; summary?: string };
   steps: number;
+  turnSteps: number;
+  turnStartedAt?: number;
+  timer: TaskTimer;
+  recent: Activity[];
 }
 
 function decodeArg(v: unknown): unknown {
@@ -190,6 +195,9 @@ export class AntigravityAdapter implements Adapter {
       votes: new Map(),
       projectVotesAt: -1,
       steps: 0,
+      turnSteps: 0,
+      timer: new TaskTimer(),
+      recent: [],
     };
   }
 
@@ -229,6 +237,8 @@ export class AntigravityAdapter implements Adapter {
     const source = String(o.source ?? '');
     const tools: string[] = [];
     const gemini = path.join(ctx.home, '.gemini');
+    const running = st.recent[0];
+    if (running && running.endedAt === undefined && status !== 'RUNNING') running.endedAt = at;
 
     for (const tc of Array.isArray(o.tool_calls) ? o.tool_calls : []) {
       const name = String(tc?.name ?? '');
@@ -243,6 +253,11 @@ export class AntigravityAdapter implements Adapter {
         detail: typeof cmd === 'string' ? truncate(cmd, 80) : undefined,
         startedAt: at,
       };
+      if (!ASK_TOOLS.has(name)) {
+        st.recent.unshift(st.activity);
+        if (st.recent.length > 6) st.recent.length = 6;
+        st.timer.step();
+      }
       for (const [key, weight] of Object.entries(PATH_ARGS)) {
         const v = decodeArg(args[key]);
         if (typeof v !== 'string' || !path.isAbsolute(v) || isWithin(v, gemini)) continue;
@@ -252,6 +267,11 @@ export class AntigravityAdapter implements Adapter {
     }
 
     if (type === 'USER_INPUT' && typeof o.content === 'string') this.onUserInput(st, o.content, source, gemini);
+    if (type === 'USER_INPUT' && source === 'USER_EXPLICIT') {
+      st.turnSteps = 0;
+      st.turnStartedAt = at;
+    }
+    st.turnSteps += tools.length;
     if (type === 'ERROR_MESSAGE') st.error = firstLine(String(o.content ?? o.error ?? 'Error'), 120);
     else if (source === 'MODEL') st.error = undefined;
 
@@ -301,6 +321,7 @@ export class AntigravityAdapter implements Adapter {
       tasks: parsed?.tasks ?? [],
       summary: typeof meta?.summary === 'string' ? meta.summary : undefined,
     };
+    st.timer.observe(st.task.tasks, s.mtimeMs);
     if (s.mtimeMs > st.updatedAt) st.updatedAt = s.mtimeMs;
     st.startedAt ??= s.mtimeMs;
   }
@@ -358,6 +379,9 @@ export class AntigravityAdapter implements Adapter {
       title: st.task?.title || st.firstInput || current?.title || 'Antigravity conversation',
       projectPath: this.projectOf(st, ctx.home),
       model: st.model,
+      turn: st.turnStartedAt !== undefined ? { steps: st.turnSteps, startedAt: st.turnStartedAt } : undefined,
+      current: status === 'working' || status === 'waiting' ? st.timer.current(tasks) : undefined,
+      recent: st.recent.slice(0, 5),
       status,
       statusDetail: detail,
       startedAt: st.startedAt,

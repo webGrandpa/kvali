@@ -19,6 +19,7 @@ import type { Activity, AgentSession, DailyUsage, RateLimitWindow, TaskItem, Tas
 import { progressOf } from '../model.ts';
 import { findGitRoot, listDir, statSafe } from '../util/fs.ts';
 import { contentText, firstLine, summarizeCommand, truncate } from '../util/text.ts';
+import { TaskTimer } from '../util/task-timer.ts';
 import { dayKey, parseTime } from '../util/time.ts';
 
 interface CodexState {
@@ -27,6 +28,7 @@ interface CodexState {
   cwd?: string;
   model?: string;
   isSubagent: boolean;
+  version?: string;
   title?: string;
   startedAt?: number;
   updatedAt: number;
@@ -44,6 +46,10 @@ interface CodexState {
   phaseAt: number;
   errorText?: string;
   turns: number;
+  turnSteps: number;
+  turnStartedAt?: number;
+  timer: TaskTimer;
+  recent: Activity[];
 }
 
 function planStatus(s: unknown): TaskStatus {
@@ -128,6 +134,9 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
       phase: 'idle',
       phaseAt: 0,
       turns: 0,
+      turnSteps: 0,
+      timer: new TaskTimer(),
+      recent: [],
     };
   }
 
@@ -146,6 +155,7 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
       case 'session_meta': {
         if (typeof p.id === 'string') st.id = p.id;
         if (typeof p.cwd === 'string') st.cwd = p.cwd;
+        if (typeof p.cli_version === 'string') st.version = p.cli_version;
         if (p.parent_thread_id || p.agent_role || p.agent_nickname) st.isSubagent = true;
         const started = parseTime(p.timestamp);
         if (started) st.startedAt = Math.min(st.startedAt ?? started, started);
@@ -173,6 +183,8 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
         st.phase = 'working';
         st.phaseAt = ts;
         st.turns += 1;
+        st.turnSteps = 0;
+        st.turnStartedAt = ts;
         st.activity = { kind: 'thinking', label: 'Thinking', startedAt: ts };
         return;
       case 'task_complete':
@@ -282,29 +294,41 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
             title: String(item?.step ?? ''),
             status: planStatus(item?.status),
           }));
+          st.timer.observe(st.tasks, ts);
         }
         const act = describeCodexCall(name, args, ts);
         if (typeof p.call_id === 'string') st.open.set(p.call_id, act);
         st.activity = act;
+        st.turnSteps += 1;
+        if (name !== 'update_plan') {
+          st.recent.unshift(act);
+          if (st.recent.length > 6) st.recent.length = 6;
+          st.timer.step();
+        }
         return;
       }
       case 'custom_tool_call': {
         const act = describeCodexCall(String(p.name ?? 'tool'), {}, ts);
         if (typeof p.call_id === 'string') st.open.set(p.call_id, act);
         st.activity = act;
+        st.turnSteps += 1;
         return;
       }
       case 'local_shell_call': {
         const act: Activity = { kind: 'command', label: 'Shell', detail: summarizeCommand(p.action?.command), startedAt: ts };
         if (typeof p.call_id === 'string') st.open.set(p.call_id, act);
         st.activity = act;
+        st.turnSteps += 1;
         return;
       }
       case 'function_call_output':
-      case 'custom_tool_call_output':
+      case 'custom_tool_call_output': {
+        const done = typeof p.call_id === 'string' ? st.open.get(p.call_id) : undefined;
+        if (done) done.endedAt = ts;
         if (typeof p.call_id === 'string') st.open.delete(p.call_id);
         st.activity = { kind: 'thinking', label: 'Thinking', startedAt: ts };
         return;
+      }
       case 'web_search_call':
         st.activity = { kind: 'tool', label: 'Searching the web', detail: truncate(String(p.action?.query ?? ''), 70) || undefined, startedAt: ts };
         return;
@@ -358,6 +382,7 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
       projectPath: st.cwd ? (findGitRoot(st.cwd) ?? st.cwd) : undefined,
       cwd: st.cwd,
       model: st.model,
+      agentVersion: st.version,
       status,
       statusDetail: detail,
       startedAt: st.startedAt,
@@ -370,6 +395,9 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
       context: st.context,
       rateLimits: st.rateLimits,
       turns: st.turns,
+      turn: st.turnStartedAt !== undefined ? { steps: st.turnSteps, startedAt: st.turnStartedAt } : undefined,
+      current: status === 'working' || status === 'stale' ? st.timer.current(st.tasks) : undefined,
+      recent: st.recent.slice(0, 5),
       sources: [st.file],
     };
   }

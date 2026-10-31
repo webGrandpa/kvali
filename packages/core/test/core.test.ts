@@ -6,12 +6,15 @@ import { ProgressFileAdapter } from '../src/adapters/progress-file.ts';
 import { fmtTokens, fmtUsd, groupByProject, pathWithin } from '../src/format.ts';
 import { claudeHookCommand, claudeHooksStatus, installClaudeHooks, uninstallClaudeHooks } from '../src/hooks/claude-install.ts';
 import { HookHub, normalizeHookPayload } from '../src/hooks/hub.ts';
+import { CLAUDE_PLAN_CONTEXT, claudeHookReply } from '../src/hooks/replies.ts';
 import type { AgentSession } from '../src/model.ts';
 import { progressOf } from '../src/model.ts';
 import { Pricing, anthropicModelKey } from '../src/pricing.ts';
-import { addProgressProtocol, PROGRESS_PROTOCOL_MARKER } from '../src/protocol.ts';
+import { addGlobalPlanRule, addProgressProtocol, PLAN_RULE_MARKER, PROGRESS_PROTOCOL_MARKER, removeGlobalPlanRule } from '../src/protocol.ts';
 import { parseChecklist } from '../src/util/checklist.ts';
 import { JsonlTail } from '../src/util/jsonl.ts';
+import { TaskTimer } from '../src/util/task-timer.ts';
+import { mergeProgressFiles } from '../src/engine.ts';
 import { Clock, engineFor, only, tmpHome, writeText } from './helpers.ts';
 
 test('JsonlTail consumes only complete lines and survives truncation', async () => {
@@ -161,6 +164,34 @@ test('addProgressProtocol appends once', async () => {
   assert.equal(text.split(PROGRESS_PROTOCOL_MARKER).length, 2);
 });
 
+test('addProgressProtocol updates an older Kvali section in place', async () => {
+  const root = tmpHome();
+  const file = path.join(root, 'AGENTS.md');
+  const old = '<!-- kvali:progress-protocol v1 -->\n## Progress reporting\n\n- Otherwise, maintain `.agents/progress.md`.\n<!-- /kvali:progress-protocol -->';
+  writeText(file, `# Rules\nUse pnpm.\n\n${old}\n\n## After\nKeep this.\n`);
+  assert.equal((await addProgressProtocol(root)).result, 'updated');
+  const text = readFileSync(file, 'utf8');
+  assert.ok(text.startsWith('# Rules\nUse pnpm.\n\n<!-- kvali:progress-protocol v2 -->'));
+  assert.ok(text.endsWith('<!-- /kvali:progress-protocol -->\n\n## After\nKeep this.\n'), 'text after the section is kept');
+  assert.ok(!text.includes('v1 -->') && text.includes('do not create `.agents/progress.md`'));
+  assert.equal((await addProgressProtocol(root)).result, 'exists');
+
+  // Windows line endings stay Windows line endings, and a current section is not rewritten again.
+  const crlf = path.join(tmpHome(), 'x');
+  writeText(path.join(crlf, 'AGENTS.md'), `# Rules\r\n\r\n${old.replace(/\n/g, '\r\n')}\r\n`);
+  assert.equal((await addProgressProtocol(crlf)).result, 'updated');
+  const t2 = readFileSync(path.join(crlf, 'AGENTS.md'), 'utf8');
+  assert.ok(!/[^\r]\n/.test(t2), 'no bare LF');
+  assert.equal((await addProgressProtocol(crlf)).result, 'exists');
+
+  // Without the closing marker Kvali cannot tell where its section ends, so it changes nothing.
+  const open = path.join(tmpHome(), 'y');
+  const broken = `# Rules\n\n<!-- kvali:progress-protocol v1 -->\n## Progress reporting\nmy own notes\n`;
+  writeText(path.join(open, 'AGENTS.md'), broken);
+  assert.equal((await addProgressProtocol(open)).result, 'exists');
+  assert.equal(readFileSync(path.join(open, 'AGENTS.md'), 'utf8'), broken);
+});
+
 test('Claude hook installer preserves user settings and is idempotent', async () => {
   const home = tmpHome();
   const file = path.join(home, '.claude', 'settings.json');
@@ -180,6 +211,8 @@ test('Claude hook installer preserves user settings and is idempotent', async ()
   assert.equal(s.hooks.Stop.length, 2, "user's Stop hook kept, Kvali's added once");
   assert.equal(s.hooks.Notification[0].hooks[0].command, claudeHookCommand(47821));
   assert.equal(s.hooks.Notification[0].hooks[0].async, true);
+  assert.equal(s.hooks.UserPromptSubmit[0].hooks[0].async, undefined, 'the prompt hook is synchronous so it can return planning context');
+  assert.ok(!s.hooks.UserPromptSubmit[0].hooks[0].command.includes('/dev/null'));
 
   assert.equal((await uninstallClaudeHooks(file)).changed, true);
   const after = JSON.parse(readFileSync(file, 'utf8'));
@@ -232,4 +265,129 @@ test('Engine isolates a failing adapter', async () => {
   writeText(path.join(root, '.agents', 'progress.md'), '# T\n- [ ] a\n');
   const e2 = engineFor(new ProgressFileAdapter(), root, new Clock(new Date().toISOString()), { workspaceRoots: [root] });
   assert.equal((await only(e2)).title, 'T');
+});
+
+test('addGlobalPlanRule writes only to installed agents and only once', async () => {
+  const home = tmpHome();
+  writeText(path.join(home, '.claude', 'CLAUDE.md'), '# My rules\nAnswer in Georgian.\n');
+  writeText(path.join(home, '.gemini', 'settings.json'), '{}');
+  const first = await addGlobalPlanRule(home, {});
+  assert.deepEqual(
+    first.map((r) => [r.agent, r.result]),
+    [
+      ['Claude Code', 'added'],
+      ['Gemini CLI / Antigravity', 'created'],
+    ],
+  );
+  const claude = readFileSync(path.join(home, '.claude', 'CLAUDE.md'), 'utf8');
+  assert.ok(claude.startsWith('# My rules\nAnswer in Georgian.\n\n'));
+  assert.ok(claude.includes(PLAN_RULE_MARKER));
+  const second = await addGlobalPlanRule(home, {});
+  assert.ok(second.every((r) => r.result === 'exists'));
+});
+
+test('addGlobalPlanRule refreshes an older rule in place and removal still finds it', async () => {
+  const home = tmpHome();
+  const file = path.join(home, '.gemini', 'GEMINI.md');
+  const mine = '# Mine\nShort answers.\n';
+  writeText(file, `${mine}\n<!-- kvali:plan-rule v0 -->\nOld wording.\n<!-- /kvali:plan-rule -->\n`);
+  const [r] = await addGlobalPlanRule(home, {}, ['gemini']);
+  assert.equal(r.result, 'updated');
+  const text = readFileSync(file, 'utf8');
+  assert.ok(text.startsWith(`${mine}\n${PLAN_RULE_MARKER}`) && !text.includes('Old wording'));
+  assert.equal((await addGlobalPlanRule(home, {}, ['gemini']))[0].result, 'exists');
+  await removeGlobalPlanRule(home, {});
+  assert.equal(readFileSync(file, 'utf8'), mine);
+});
+
+test('Hook status flags the older all-async layout as outdated', async () => {
+  const home = tmpHome();
+  const file = path.join(home, '.claude', 'settings.json');
+  const old = (cmd: string) => [{ hooks: [{ type: 'command', command: cmd, async: true, timeout: 5 }] }];
+  const cmd = claudeHookCommand(47821);
+  writeText(file, JSON.stringify({ hooks: { UserPromptSubmit: old(cmd), Notification: old(cmd), Stop: old(cmd), SessionEnd: old(cmd) } }));
+  assert.equal(await claudeHooksStatus(file, 47821), 'outdated');
+  await installClaudeHooks(file, 47821);
+  assert.equal(await claudeHooksStatus(file, 47821), 'installed');
+});
+
+test('Planning context is sent only while a session has no unfinished plan', () => {
+  const ev = { sessionId: 's', event: 'UserPromptSubmit', at: 0 };
+  const base: AgentSession = { key: 'claude-code:s', agent: 'claude-code', agentLabel: 'Claude Code', id: 's', title: 't', status: 'idle', startedAt: 0, updatedAt: 0, tasks: [], sources: [] };
+  const reply = claudeHookReply(ev, undefined) as any;
+  assert.equal(reply.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+  assert.equal(reply.hookSpecificOutput.additionalContext, CLAUDE_PLAN_CONTEXT);
+  const running = { ...base, tasks: [{ id: '1', title: 'a', status: 'completed' as const }, { id: '2', title: 'b', status: 'in_progress' as const }] };
+  assert.equal(claudeHookReply(ev, running), undefined);
+  const finished = { ...base, tasks: [{ id: '1', title: 'a', status: 'completed' as const }] };
+  assert.ok(claudeHookReply(ev, finished), 'a finished plan gets a nudge for the next request');
+  assert.equal(claudeHookReply({ ...ev, event: 'Stop' }, undefined), undefined);
+});
+
+test('Hook hub returns the reply body to synchronous hooks', async () => {
+  const port = 40_000 + Math.floor(Math.random() * 20_000);
+  const hub = new HookHub({ port, liveDir: path.join(tmpHome(), 'live'), respond: (_a, ev) => claudeHookReply(ev, undefined) });
+  hub.start();
+  for (let i = 0; i < 50 && !hub.isHub; i += 1) await new Promise((r) => setTimeout(r, 20));
+  const res = await fetch(`http://127.0.0.1:${port}/v1/events/claude-code`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: 'abc', hook_event_name: 'UserPromptSubmit', prompt: 'do things' }),
+  });
+  const body = (await res.json()) as any;
+  assert.equal(body.hookSpecificOutput.additionalContext, CLAUDE_PLAN_CONTEXT);
+  hub.dispose();
+});
+
+test('removeGlobalPlanRule restores files and deletes the ones Kvali created', async () => {
+  const home = tmpHome();
+  const original = '# My rules\nAnswer in Georgian.\n';
+  writeText(path.join(home, '.claude', 'CLAUDE.md'), original);
+  writeText(path.join(home, '.gemini', 'settings.json'), '{}');
+  await addGlobalPlanRule(home, {});
+  const changed = await removeGlobalPlanRule(home, {});
+  assert.equal(changed.length, 2);
+  assert.equal(readFileSync(path.join(home, '.claude', 'CLAUDE.md'), 'utf8'), original);
+  assert.throws(() => readFileSync(path.join(home, '.gemini', 'GEMINI.md')));
+  const only = await addGlobalPlanRule(home, {}, ['gemini']);
+  assert.deepEqual(only.map((r) => r.agent), ['Gemini CLI / Antigravity']);
+});
+
+test('TaskTimer times the current step and learns the typical step duration', () => {
+  const timer = new TaskTimer();
+  const plan = (a: string, b: string, c: string) => [
+    { id: '1', title: 'Design', status: a as any },
+    { id: '2', title: 'Build', status: b as any },
+    { id: '3', title: 'Test', status: c as any },
+  ];
+  timer.observe(plan('in_progress', 'pending', 'pending'), 0);
+  timer.step();
+  timer.observe(plan('completed', 'in_progress', 'pending'), 240_000);
+  timer.step();
+  timer.step();
+  const cur = timer.current(plan('completed', 'in_progress', 'pending'));
+  assert.deepEqual(cur, { taskId: '2', startedAt: 240_000, steps: 2, typicalMs: 240_000 });
+  timer.observe(plan('completed', 'completed', 'in_progress'), 600_000);
+  assert.equal(timer.current(plan('completed', 'completed', 'in_progress'))?.typicalMs, 300_000, 'median of 4m and 6m');
+});
+
+test('A progress file written by a natively tracked agent merges into that agent\'s card', () => {
+  const base = { id: 'x', startedAt: 0, sources: [] as string[] };
+  const claude: AgentSession = { ...base, key: 'claude-code:x', agent: 'claude-code', agentLabel: 'Claude Code', title: 'Site changes', projectPath: '/w/site', status: 'working', updatedAt: 10, tasks: [], sources: ['/t.jsonl'] };
+  const pf: AgentSession = {
+    ...base,
+    key: 'progress-file:/w/site/.agents/progress.md',
+    agent: 'progress-file',
+    agentLabel: 'Claude Code',
+    title: 'Site changes',
+    projectPath: '/w/site',
+    status: 'working',
+    updatedAt: 5,
+    tasks: [{ id: '1', title: 'Phone check', status: 'in_progress' }],
+    sources: ['/w/site/.agents/progress.md'],
+  };
+  const other: AgentSession = { ...pf, key: 'progress-file:/w/other', agentLabel: 'Cursor', projectPath: '/w/other' };
+  const merged = mergeProgressFiles([claude, pf, other]);
+  assert.deepEqual(merged.map((s) => s.key), ['claude-code:x', 'progress-file:/w/other']);
+  assert.equal(merged[0].tasks[0].title, 'Phone check', 'the native card borrows the plan it lacked');
 });

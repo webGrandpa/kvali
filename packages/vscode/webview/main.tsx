@@ -10,6 +10,7 @@ import {
   groupByProject,
   pathWithin,
   progressOf,
+  sessionTodayTokens,
   sessionTokens,
   todayUsage,
   type AgentSession,
@@ -83,6 +84,104 @@ function ProgressBar({ p, moving }: { p: Progress; moving: boolean }) {
   );
 }
 
+/** Shown while an agent works without a plan: an indeterminate bar plus how many steps this turn took. */
+function NoPlanBar({ s, now, autoPlans }: { s: AgentSession; now: number; autoPlans: boolean }) {
+  const steps = s.turn?.steps ?? 0;
+  return (
+    <>
+      <div class="progress">
+        <div class="bar indeterminate" role="progressbar" aria-label="Working without a plan">
+          <span />
+        </div>
+        <span class="count">
+          <strong>
+            {steps} step{steps === 1 ? '' : 's'}
+          </strong>
+          {s.turn && <span class="muted"> · {fmtDuration(now - s.turn.startedAt)}</span>}
+        </span>
+      </div>
+      <div class="noplan">
+        {autoPlans ? (
+          <span class="muted">% appears as soon as the agent writes its plan.</span>
+        ) : (
+          <>
+            <span class="muted">No plan yet.</span>
+            <button class="link" title="One-time setup: agents keep a plan automatically" onClick={() => post({ type: 'runSetup' })}>
+              Turn on automatic plans
+            </button>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+const QUIET_WARN_MS = 5 * 60_000;
+
+/** The current step: its own progress bar (elapsed vs. this plan's typical step), liveness, and the latest actions. */
+function NowPanel({ s, step, now }: { s: AgentSession; step: TaskItem | undefined; now: number }) {
+  const cur = s.current;
+  const elapsed = cur ? now - cur.startedAt : 0;
+  const ratio = cur?.typicalMs ? elapsed / cur.typicalMs : undefined;
+  const slow = ratio !== undefined && ratio > 1.5;
+  return (
+    <div class="now">
+      {step && <div class="step">{step.activeTitle ?? step.title}</div>}
+      {cur &&
+        (ratio !== undefined ? (
+          <div class="stepbar">
+            <div class={`bar mini ${slow ? 'slow' : ''}`} role="progressbar" aria-label="Time on this step compared with earlier steps">
+              <span style={{ width: `${Math.min(95, Math.round(ratio * 100))}%` }} />
+            </div>
+            <span class={`small ${slow ? 'warn' : 'muted'}`}>
+              {fmtDuration(elapsed)} of ~{fmtDuration(cur.typicalMs!)}
+              {slow ? ' · slower than earlier steps' : ''}
+            </span>
+          </div>
+        ) : (
+          <div class="muted small">
+            On this step {fmtDuration(elapsed)}
+            {cur.steps ? ` · ${cur.steps} action${cur.steps === 1 ? '' : 's'}` : ''}
+          </div>
+        ))}
+      <Liveness s={s} now={now} />
+      {s.recent && s.recent.length > 0 && (
+        <ul class="recent">
+          {s.recent.slice(0, 3).map((a, i) => (
+            <li key={`${a.startedAt}-${i}`} class={a.endedAt ? 'done' : 'running'}>
+              <span class="mark">{a.endedAt ? '✓' : '›'}</span>
+              <span class="what">
+                {a.label}
+                {a.detail && <code> {a.detail}</code>}
+              </span>
+              <span class="muted when">{a.endedAt ? fmtDuration(a.endedAt - a.startedAt) : fmtDuration(now - a.startedAt)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** Is it working, waiting on a long command, retrying, or silent? */
+function Liveness({ s, now }: { s: AgentSession; now: number }) {
+  const quiet = now - s.updatedAt;
+  const a = s.activity;
+  const running = a && !a.endedAt && a.kind !== 'thinking' && a.kind !== 'message';
+  if (s.trouble && now - s.trouble.at < 15 * 60_000) {
+    const retry = s.trouble.attempt ? ` · retry ${s.trouble.attempt}${s.trouble.maxAttempts ? `/${s.trouble.maxAttempts}` : ''}` : '';
+    return <div class="live warn">⚠ Connection or API problem{retry}: {s.trouble.message}</div>;
+  }
+  if (quiet < 30_000) return <div class="live ok">● Active · last action {fmtAgo(s.updatedAt, now)}</div>;
+  if (running) return <div class="live">◌ Waiting for “{a!.label}” to finish · {fmtDuration(now - a!.startedAt)}</div>;
+  if (quiet < QUIET_WARN_MS) return <div class="live muted">◌ Thinking · quiet for {fmtDuration(quiet)}</div>;
+  return (
+    <div class="live warn">
+      ⚠ No output for {fmtDuration(quiet)} and nothing is running. It may be stuck or offline; check the agent’s window.
+    </div>
+  );
+}
+
 function TaskList({ tasks }: { tasks: TaskItem[] }) {
   let group: string | undefined;
   const rows = [];
@@ -105,10 +204,26 @@ function TaskList({ tasks }: { tasks: TaskItem[] }) {
   return <ul class="tasks">{rows}</ul>;
 }
 
-function Card({ s, now, expanded, onToggle, showCost }: { s: AgentSession; now: number; expanded: boolean; onToggle: () => void; showCost: boolean }) {
+function Card({
+  s,
+  now,
+  expanded,
+  onToggle,
+  showCost,
+  autoPlans,
+}: {
+  s: AgentSession;
+  now: number;
+  expanded: boolean;
+  onToggle: () => void;
+  showCost: boolean;
+  autoPlans: boolean;
+}) {
   const p = progressOf(s.tasks);
   const step = currentTask(s.tasks);
   const tok = sessionTokens(s);
+  const todayTok = sessionTodayTokens(s, now);
+  const showToday = tok !== undefined && todayTok !== undefined && todayTok < tok * 0.95;
   const ctxPct = s.context?.window ? Math.min(100, Math.round((s.context.used / s.context.window) * 100)) : undefined;
   const working = s.status === 'working';
   const showDetail = !!s.statusDetail && !working;
@@ -134,38 +249,26 @@ function Card({ s, now, expanded, onToggle, showCost }: { s: AgentSession; now: 
 
       {showDetail && <div class={`detail d-${s.status}`}>{s.statusDetail}</div>}
 
-      {p.total > 0 && <ProgressBar p={p} moving={working} />}
+      {p.total > 0 ? <ProgressBar p={p} moving={working} /> : working && <NoPlanBar s={s} now={now} autoPlans={autoPlans} />}
 
-      {working && (step || s.activity) && (
-        <div class="now">
-          {step && <div class="step">{step.activeTitle ?? step.title}</div>}
-          {s.activity && (
-            <>
-              <div class="activity">
-                <span class="act-label">{s.activity.label}</span>
-                <span class="elapsed">{fmtDuration(now - s.activity.startedAt)}</span>
-              </div>
-              {s.activity.detail && (
-                <code class="act-detail" title={s.activity.detail}>
-                  {s.activity.detail}
-                </code>
-              )}
-            </>
-          )}
-        </div>
-      )}
+      {(working || s.status === 'stale') && <NowPanel s={s} step={step} now={now} />}
 
       <div class="meta">
         {tok !== undefined ? (
-          <span title={tokenTitle(s)}>
+          <span title={`${tokenTitle(s)}${showToday ? ' · whole conversation, all days' : ''}`}>
             <strong>{fmtTokens(tok)}</strong> tokens
+            {showToday && <span class="muted"> ({fmtTokens(todayTok)} today)</span>}
           </span>
         ) : (
           <span class="muted" title="This agent does not record token usage on disk">
             tokens n/a
           </span>
         )}
-        {showCost && s.costUsd !== undefined && <span title="Estimated at API list prices">≈{fmtUsd(s.costUsd)}</span>}
+        {showCost && s.costUsd !== undefined && (
+          <span class="muted" title="What these tokens would cost at API list prices. Subscriptions are not billed per token.">
+            API value {fmtUsd(s.costUsd)}
+          </span>
+        )}
         {ctxPct !== undefined && (
           <span class="ctx" title={`Context window: ${fmtTokens(s.context!.used)} of ${fmtTokens(s.context!.window)}`}>
             ctx <Meter value={ctxPct} label="Context window used" /> {ctxPct}%
@@ -198,7 +301,21 @@ function Card({ s, now, expanded, onToggle, showCost }: { s: AgentSession; now: 
   );
 }
 
-function Group({ g, now, ui, setUi, showCost }: { g: ProjectGroup; now: number; ui: UiState; setUi: (u: UiState) => void; showCost: boolean }) {
+function Group({
+  g,
+  now,
+  ui,
+  setUi,
+  showCost,
+  autoPlans,
+}: {
+  g: ProjectGroup;
+  now: number;
+  ui: UiState;
+  setUi: (u: UiState) => void;
+  showCost: boolean;
+  autoPlans: boolean;
+}) {
   const id = g.path ?? '';
   const open = !ui.collapsed.includes(id);
   const active = g.sessions.filter((s) => s.status === 'working' || s.status === 'waiting').length;
@@ -216,7 +333,7 @@ function Group({ g, now, ui, setUi, showCost }: { g: ProjectGroup; now: number; 
           <span class="muted small group-sub">
             {g.sessions.length} session{g.sessions.length === 1 ? '' : 's'}
             {g.today.tokens > 0 && ` · ${fmtTokens(g.today.tokens)} tokens today`}
-            {showCost && g.today.costUsd > 0 ? ` · ≈${fmtUsd(g.today.costUsd)}` : ''}
+            {showCost && g.today.costUsd > 0 ? ` · API value ${fmtUsd(g.today.costUsd)}` : ''}
           </span>
         </span>
       </button>
@@ -227,6 +344,7 @@ function Group({ g, now, ui, setUi, showCost }: { g: ProjectGroup; now: number; 
             s={s}
             now={now}
             showCost={showCost}
+            autoPlans={autoPlans}
             expanded={ui.expanded.includes(s.key)}
             onToggle={() =>
               setUi({ ...ui, expanded: ui.expanded.includes(s.key) ? ui.expanded.filter((k) => k !== s.key) : [...ui.expanded, s.key] })
@@ -335,7 +453,8 @@ function App() {
   const sessions = st.scope === 'workspace' ? st.snapshot.sessions.filter(inWs) : st.snapshot.sessions;
   const groups = groupByProject(sessions, st.workspaceRoots, now);
   const today = todayUsage(sessions, now);
-  const hasClaude = st.snapshot.sessions.some((s) => s.agent === 'claude-code');
+  const autoPlans = st.setup === 'on';
+  const needsRepair = st.setup === 'on' && st.detected.includes('Claude Code') && st.claudeHooks !== 'installed';
 
   return (
     <main>
@@ -345,7 +464,7 @@ function App() {
           {st.showCost && today.priced && (
             <>
               {' '}
-              · <strong title="Estimated at API list prices">≈{fmtUsd(today.costUsd)}</strong>
+              · <span class="muted" title="What these tokens would cost at API list prices. Subscriptions are not billed per token.">API value {fmtUsd(today.costUsd)}</span>
             </>
           )}
         </div>
@@ -358,19 +477,39 @@ function App() {
           </button>
         </div>
       </header>
+      {st.setup === 'unset' && st.detected.length > 0 && (
+        <aside class="setup">
+          <p class="setup-title">
+            <b>One click to finish:</b> alerts when an agent needs you, and a plan for every task.
+          </p>
+          <ul>
+            {st.setupChanges.map((c) => (
+              <li key={c}>{c}</li>
+            ))}
+          </ul>
+          <p class="muted small">Your own settings stay as they are. Uninstalling Kvali removes all of it.</p>
+          <div class="setup-actions">
+            <button class="btn" onClick={() => post({ type: 'runSetup' })}>
+              Turn on
+            </button>
+            <button class="link" onClick={() => post({ type: 'dismissSetup' })}>
+              Not now
+            </button>
+          </div>
+        </aside>
+      )}
       <Counts sessions={sessions} />
       <Limits sessions={sessions} now={now} />
 
-      {groups.length === 0 ? <Empty hours={st.activeWindowHours} scope={st.scope} /> : groups.map((g) => <Group key={g.path ?? ''} g={g} now={now} ui={ui} setUi={setUi} showCost={st.showCost} />)}
+      {groups.length === 0 ? <Empty hours={st.activeWindowHours} scope={st.scope} /> : groups.map((g) => <Group key={g.path ?? ''} g={g} now={now} ui={ui} setUi={setUi} showCost={st.showCost} autoPlans={autoPlans} />)}
 
-      {hasClaude && st.claudeHooks !== 'installed' && (
+      {needsRepair && (
         <aside class="tip">
           <p>
-            <b>Know the moment Claude needs you.</b> Claude Code's transcript does not record permission prompts. Kvali's hooks add an exact
-            “Needs you” status and alerts.
+            <b>Claude Code hooks need a refresh.</b> Without them "Needs you" alerts and automatic plans are off.
           </p>
-          <button class="btn" onClick={() => post({ type: 'command', command: 'kvali.installClaudeHooks' })}>
-            {st.claudeHooks === 'outdated' ? 'Update hooks' : 'Install Claude Code hooks'}
+          <button class="btn" onClick={() => post({ type: 'runSetup' })}>
+            Repair
           </button>
         </aside>
       )}

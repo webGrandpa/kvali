@@ -17,6 +17,7 @@ import type { AgentSession, SessionStatus } from '../model.ts';
 import { progressOf } from '../model.ts';
 import { parseChecklist } from '../util/checklist.ts';
 import { listDir, readTextSafe, statSafe } from '../util/fs.ts';
+import { TaskTimer } from '../util/task-timer.ts';
 import { basename, truncate } from '../util/text.ts';
 
 const STATUS_WORDS: Record<string, SessionStatus> = {
@@ -39,6 +40,7 @@ export class ProgressFileAdapter implements Adapter {
   readonly label = 'Progress file';
 
   private readonly cache = new Map<string, { mtimeMs: number; session: AgentSession }>();
+  private readonly timers = new Map<string, TaskTimer>();
 
   async poll(ctx: AdapterContext): Promise<AgentSession[]> {
     const files: { file: string; root: string }[] = [];
@@ -60,7 +62,12 @@ export class ProgressFileAdapter implements Adapter {
       if (!entry || entry.mtimeMs !== st.mtimeMs) {
         const md = await readTextSafe(file, 1 << 20);
         if (md === undefined) continue;
-        entry = { mtimeMs: st.mtimeMs, session: this.build(file, root, md, st.mtimeMs, st.birthtimeMs) };
+        const session = this.build(file, root, md, st.mtimeMs, st.birthtimeMs);
+        const timer = this.timers.get(file) ?? new TaskTimer();
+        this.timers.set(file, timer);
+        timer.observe(session.tasks, st.mtimeMs);
+        session.current = timer.current(session.tasks);
+        entry = { mtimeMs: st.mtimeMs, session };
         this.cache.set(file, entry);
       }
       if (ctx.now() - entry.mtimeMs > ctx.activeWindowMs) continue;

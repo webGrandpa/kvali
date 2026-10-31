@@ -68,6 +68,7 @@ test('Codex: plan, tokens, rate limits and turn status from a rollout file', asy
   assert.equal(s.activity?.label, 'Shell');
   assert.equal(s.activity?.detail, 'cargo test -p api');
   assert.deepEqual(progressOf(s.tasks), { done: 1, inProgress: 1, total: 4, percent: 25 });
+  assert.equal(s.turn?.steps, 2);
   assert.deepEqual(s.tokens, { input: 3_000, cacheRead: 9_000, cacheWrite: 0, output: 800, reasoning: 300 });
   assert.deepEqual(s.context, { used: 6_400, window: 272_000 });
   assert.equal(s.rateLimits?.[0].label, '5h');

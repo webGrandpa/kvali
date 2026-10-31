@@ -265,6 +265,17 @@ export class GeminiCliAdapter implements Adapter {
       }
     }
 
+    let lastUser = -1;
+    for (let i = msgs.length - 1; i >= 0; i -= 1) {
+      if (msgs[i].type === 'user') {
+        lastUser = i;
+        break;
+      }
+    }
+    let turnSteps = 0;
+    for (const m of msgs.slice(lastUser + 1)) if (m.type === 'gemini' && Array.isArray(m.toolCalls)) turnSteps += m.toolCalls.length;
+    const turn = lastUser >= 0 ? { steps: turnSteps, startedAt: parseTime(msgs[lastUser].timestamp) ?? updatedAt } : undefined;
+
     const last = msgs[msgs.length - 1];
     let phase: 'working' | 'waiting' | 'idle' | 'error' = 'idle';
     let detail: string | undefined;
@@ -307,6 +318,7 @@ export class GeminiCliAdapter implements Adapter {
       updatedAt: Math.max(updatedAt, st.lastUpdated ?? 0),
       tasks,
       activity: lastActivity,
+      turn,
       tokens,
       costUsd,
       daily,

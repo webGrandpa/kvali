@@ -20,6 +20,7 @@ import type { Activity, AgentSession, DailyUsage, TaskItem, TaskStatus, TokenUsa
 import { addTokens, emptyTokens, progressOf } from '../model.ts';
 import { findGitRoot, listDir, readJsonSafe, statSafe } from '../util/fs.ts';
 import { JsonlTail } from '../util/jsonl.ts';
+import { TaskTimer } from '../util/task-timer.ts';
 import { contentText, firstLine, stripInjectedTags, summarizeCommand, truncate } from '../util/text.ts';
 import { dayKey, parseTime } from '../util/time.ts';
 
@@ -43,6 +44,7 @@ interface ClaudeState {
   projectDir: string;
   /** Directory the session was started in: it defines the project. */
   launchCwd?: string;
+  version?: string;
   /** Current working directory (may change when the agent cds). */
   cwd?: string;
   model?: string;
@@ -69,8 +71,14 @@ interface ClaudeState {
   phaseAt: number;
   errorText?: string;
   turns: number;
+  /** Tool calls since the last human prompt, and when that prompt arrived. */
+  turnSteps: number;
+  turnStartedAt?: number;
   live?: LiveState & { mtimeMs: number };
   subagents: Map<string, { tail: JsonlTail; updatedAt: number }>;
+  timer: TaskTimer;
+  recent: Activity[];
+  trouble?: { message: string; at: number; attempt?: number; maxAttempts?: number };
   lastSubagentScan: number;
 }
 
@@ -257,7 +265,10 @@ export class ClaudeCodeAdapter implements Adapter {
       phase: 'idle',
       phaseAt: 0,
       turns: 0,
+      turnSteps: 0,
       subagents: new Map(),
+      timer: new TaskTimer(),
+      recent: [],
       lastSubagentScan: 0,
     };
   }
@@ -277,6 +288,7 @@ export class ClaudeCodeAdapter implements Adapter {
       if (st.startedAt === undefined || ts < st.startedAt) st.startedAt = ts;
       if (ts > st.updatedAt) st.updatedAt = ts;
     }
+    if (typeof o.version === 'string') st.version = o.version;
     if (typeof o.cwd === 'string' && o.cwd) {
       st.cwd = o.cwd;
       st.launchCwd ??= o.cwd;
@@ -301,6 +313,13 @@ export class ClaudeCodeAdapter implements Adapter {
         return;
       case 'system':
         if (o.subtype === 'compact_boundary') st.context = undefined;
+        if (/error|retry/i.test(String(o.subtype ?? '')) || o.level === 'error' || o.level === 'warning') {
+          const err = o.error && typeof o.error === 'object' ? o.error : {};
+          const attempt = Number(o.retryAttempt ?? o.attempt ?? err.retryAttempt) || undefined;
+          const max = Number(o.maxRetries ?? o.max_retries ?? err.maxRetries) || undefined;
+          const message = firstLine(String(o.content ?? err.message ?? o.cause?.message ?? o.subtype ?? 'API problem'), 100);
+          st.trouble = { message, at: ts ?? st.updatedAt, attempt, maxAttempts: max };
+        }
         if (o.level === 'error' || o.subtype === 'api_error') {
           st.phase = 'error';
           st.phaseAt = ts ?? st.updatedAt;
@@ -364,6 +383,7 @@ export class ClaudeCodeAdapter implements Adapter {
     }
     if (typeof m.model === 'string' && m.model !== '<synthetic>') st.model = m.model;
     this.countUsage(st, o, ts, ctx, true);
+    if (m.model !== '<synthetic>') st.trouble = undefined;
 
     if (o.isApiErrorMessage || (o.error && m.model === '<synthetic>')) {
       st.phase = 'error';
@@ -400,6 +420,14 @@ export class ClaudeCodeAdapter implements Adapter {
     const act = describeClaudeTool(name, input, st.cwd, ts);
     if (typeof block.id === 'string') st.open.set(block.id, act);
     st.activity = act;
+    st.turnSteps += 1;
+    st.turnStartedAt ??= ts;
+    const planTool = name === 'TodoWrite' || (name.startsWith('Task') && name !== 'Task');
+    if (!planTool) {
+      st.recent.unshift(act);
+      if (st.recent.length > 6) st.recent.length = 6;
+      st.timer.step();
+    }
 
     if (name === 'TodoWrite' && Array.isArray(input.todos)) {
       st.todos = input.todos.map((t: any, i: number) => ({
@@ -408,6 +436,7 @@ export class ClaudeCodeAdapter implements Adapter {
         activeTitle: typeof t?.activeForm === 'string' ? t.activeForm : undefined,
         status: normStatus(t?.status),
       }));
+      st.timer.observe(st.todos ?? [], ts);
     } else if (name === 'TaskCreate' && typeof block.id === 'string') {
       st.pendingCreates.set(block.id, {
         title: String(input.subject ?? input.title ?? ''),
@@ -423,6 +452,7 @@ export class ClaudeCodeAdapter implements Adapter {
         if (typeof input.subject === 'string') t.title = input.subject;
         if (typeof input.activeForm === 'string') t.activeTitle = input.activeForm;
       }
+      st.timer.observe([...st.tasks.values()], ts);
     }
   }
 
@@ -441,9 +471,14 @@ export class ClaudeCodeAdapter implements Adapter {
             const mm = /Task #?(\w+) created/i.exec(contentText(b.content));
             if (mm) id = mm[1];
           }
-          if (id !== undefined) st.tasks.set(String(id), { id: String(id), ...pending });
+          if (id !== undefined) {
+            st.tasks.set(String(id), { id: String(id), ...pending });
+            st.timer.observe([...st.tasks.values()], ts);
+          }
           st.pendingCreates.delete(b.tool_use_id);
         }
+        const done = st.open.get(b.tool_use_id);
+        if (done) done.endedAt = ts;
         st.open.delete(b.tool_use_id);
       }
       st.phase = st.open.size > 0 ? 'tool' : 'working';
@@ -467,6 +502,8 @@ export class ClaudeCodeAdapter implements Adapter {
     if (!isCommand && (origin === undefined || origin === 'human')) {
       st.firstPrompt ??= firstLine(text, 100);
       st.turns += 1;
+      st.turnSteps = 0;
+      st.turnStartedAt = ts;
     }
     if (!isCommand) {
       st.phase = 'working';
@@ -489,18 +526,22 @@ export class ClaudeCodeAdapter implements Adapter {
         const sig = entries.map((e, i) => `${e.name}:${stats[i]?.mtimeMs ?? 0}`).join('|');
         if (sig !== st.taskDir?.sig) {
           const tasks: TaskItem[] = [];
-          for (const e of entries) {
+          const timed: { task: TaskItem; mtimeMs: number }[] = [];
+          for (const [i, e] of entries.entries()) {
             const t = await readJsonSafe<Record<string, any>>(path.join(dir, e.name));
             if (!t || t.status === 'deleted') continue;
-            tasks.push({
+            const task: TaskItem = {
               id: String(t.id ?? path.basename(e.name, '.json')),
               title: String(t.subject ?? t.title ?? ''),
               activeTitle: typeof t.activeForm === 'string' ? t.activeForm : undefined,
               status: normStatus(t.status),
-            });
+            };
+            tasks.push(task);
+            if (stats[i]) timed.push({ task, mtimeMs: stats[i]!.mtimeMs });
           }
           tasks.sort((a, b) => Number(a.id) - Number(b.id) || a.id.localeCompare(b.id));
           st.taskDir = { sig, tasks };
+          st.timer.observeFiles(timed);
         }
       }
     }
@@ -629,6 +670,7 @@ export class ClaudeCodeAdapter implements Adapter {
       projectPath: st.launchCwd ? (findGitRoot(st.launchCwd) ?? st.launchCwd) : undefined,
       cwd: st.launchCwd,
       model: st.model,
+      agentVersion: st.version,
       status,
       statusDetail: detail,
       startedAt: st.startedAt,
@@ -641,6 +683,10 @@ export class ClaudeCodeAdapter implements Adapter {
       context: st.context !== undefined ? { used: st.context, window } : undefined,
       activeSubagents: activeSubagents || undefined,
       turns: st.turns,
+      turn: st.turnStartedAt !== undefined ? { steps: st.turnSteps, startedAt: st.turnStartedAt } : undefined,
+      current: status === 'working' || status === 'waiting' || status === 'stale' ? st.timer.current(tasks) : undefined,
+      recent: st.recent.slice(0, 5),
+      trouble: status === 'working' || status === 'stale' ? st.trouble : undefined,
       sources: [st.file],
     };
   }

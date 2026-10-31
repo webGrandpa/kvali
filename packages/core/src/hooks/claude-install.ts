@@ -1,9 +1,13 @@
 /**
  * Installs or removes Kvali's Claude Code hooks in a settings.json file.
  *
- * Each hook is an async command hook that forwards the event JSON to the local
- * hook hub with curl and always exits 0, so it never blocks or breaks Claude Code,
- * even when no editor with Kvali is running.
+ * Every hook forwards the event JSON to the local hook hub with curl (bypassing any
+ * HTTP proxy, since the hub is on 127.0.0.1) and always exits 0, so it never breaks Claude Code, even when no editor with Kvali is running.
+ *
+ * - Notification, Stop, SessionEnd run `async`: fire and forget, zero latency.
+ * - UserPromptSubmit runs synchronously (1 s cap, usually a few ms) and prints the
+ *   hub's reply. When the session has no unfinished plan, the reply asks Claude to
+ *   keep a task list, which is what turns into Kvali's progress bar. No CLAUDE.md edits.
  *
  * Only long-established events are used, so older Claude Code versions accept the file.
  */
@@ -13,7 +17,19 @@ import path from 'node:path';
 import type { HookStatus } from '../model.ts';
 import { DEFAULT_HOOK_PORT } from './hub.ts';
 
-export const CLAUDE_HOOK_EVENTS = ['UserPromptSubmit', 'Notification', 'Stop', 'SessionEnd'] as const;
+interface HookSpec {
+  event: string;
+  /** Sync hooks print the hub's reply so Claude Code can read it; async hooks discard output. */
+  sync: boolean;
+}
+
+export const CLAUDE_HOOKS: readonly HookSpec[] = [
+  { event: 'UserPromptSubmit', sync: true },
+  { event: 'Notification', sync: false },
+  { event: 'Stop', sync: false },
+  { event: 'SessionEnd', sync: false },
+];
+export const CLAUDE_HOOK_EVENTS = CLAUDE_HOOKS.map((h) => h.event);
 const MARKER = '/v1/events/claude-code';
 
 export function claudeSettingsPath(home = os.homedir(), env: Record<string, string | undefined> = process.env): string {
@@ -21,8 +37,17 @@ export function claudeSettingsPath(home = os.homedir(), env: Record<string, stri
   return path.join(dir, 'settings.json');
 }
 
-export function claudeHookCommand(port = DEFAULT_HOOK_PORT): string {
-  return `curl -s -m 2 -o /dev/null -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:${port}${MARKER} || true`;
+export function claudeHookCommand(port = DEFAULT_HOOK_PORT, sync = false): string {
+  const url = `http://127.0.0.1:${port}${MARKER}`;
+  return sync
+    ? `curl -s --noproxy '*' -m 1 --connect-timeout 0.3 -H 'Content-Type: application/json' --data-binary @- ${url} || true`
+    : `curl -s --noproxy '*' -m 2 -o /dev/null -H 'Content-Type: application/json' --data-binary @- ${url} || true`;
+}
+
+function hookEntry(spec: HookSpec, port: number): Record<string, unknown> {
+  return spec.sync
+    ? { type: 'command', command: claudeHookCommand(port, true), timeout: 3 }
+    : { type: 'command', command: claudeHookCommand(port, false), async: true, timeout: 5 };
 }
 
 type Settings = Record<string, any>;
@@ -67,6 +92,7 @@ function withoutKvali(settings: Settings): Settings {
   return next;
 }
 
+/** `outdated` means Kvali hooks exist but differ from this version's layout (e.g. after an update or port change). */
 export async function claudeHooksStatus(file = claudeSettingsPath(), port = DEFAULT_HOOK_PORT): Promise<HookStatus> {
   let settings: Settings;
   try {
@@ -74,19 +100,21 @@ export async function claudeHooksStatus(file = claudeSettingsPath(), port = DEFA
   } catch {
     return 'not-installed';
   }
-  const cmd = claudeHookCommand(port);
   let found = 0;
   let current = 0;
-  for (const event of CLAUDE_HOOK_EVENTS) {
-    const groups = settings.hooks?.[event];
+  let total = 0;
+  for (const groups of Object.values(settings.hooks ?? {})) if (Array.isArray(groups)) total += groups.filter(isKvaliGroup).length;
+  for (const spec of CLAUDE_HOOKS) {
+    const groups = settings.hooks?.[spec.event];
     if (!Array.isArray(groups)) continue;
     const g = groups.find(isKvaliGroup);
     if (!g) continue;
     found += 1;
-    if (g.hooks.some((h: any) => h.command === cmd && h.async === true)) current += 1;
+    const want = hookEntry(spec, port);
+    if (g.hooks.some((h: any) => h.command === want.command && (h.async === true) === (want.async === true))) current += 1;
   }
-  if (found === 0) return 'not-installed';
-  return current === CLAUDE_HOOK_EVENTS.length ? 'installed' : 'outdated';
+  if (found === 0 && total === 0) return 'not-installed';
+  return current === CLAUDE_HOOKS.length && total === CLAUDE_HOOKS.length ? 'installed' : 'outdated';
 }
 
 async function writeWithBackup(file: string, before: string | undefined, settings: Settings): Promise<string | undefined> {
@@ -105,10 +133,9 @@ export async function installClaudeHooks(file = claudeSettingsPath(), port = DEF
   const before = await fsp.readFile(file, 'utf8').catch(() => undefined);
   const settings = withoutKvali(await readSettings(file));
   settings.hooks = settings.hooks && typeof settings.hooks === 'object' ? settings.hooks : {};
-  const entry = { hooks: [{ type: 'command', command: claudeHookCommand(port), async: true, timeout: 5 }] };
-  for (const event of CLAUDE_HOOK_EVENTS) {
-    const groups = Array.isArray(settings.hooks[event]) ? settings.hooks[event] : [];
-    settings.hooks[event] = [...groups, structuredClone(entry)];
+  for (const spec of CLAUDE_HOOKS) {
+    const groups = Array.isArray(settings.hooks[spec.event]) ? settings.hooks[spec.event] : [];
+    settings.hooks[spec.event] = [...groups, { hooks: [hookEntry(spec, port)] }];
   }
   return { backup: await writeWithBackup(file, before, settings) };
 }

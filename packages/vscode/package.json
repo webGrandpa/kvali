@@ -2,7 +2,7 @@
   "name": "kvali",
   "displayName": "Kvali — AI Agent Progress & Tokens",
   "description": "One progress bar for every AI coding agent: live task progress, current step, tokens, cost and plan limits for Claude Code, Codex, Gemini CLI, Antigravity and any agent that reads AGENTS.md.",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "publisher": "webgrandpa",
   "author": {
     "name": "Giorgi Khiladze",
@@ -85,6 +85,16 @@
         "icon": "$(filter)"
       },
       {
+        "command": "kvali.setup",
+        "title": "Set Up: Alerts and Automatic Plans",
+        "category": "Kvali"
+      },
+      {
+        "command": "kvali.turnOff",
+        "title": "Turn Off: Remove Hooks and Planning Rules",
+        "category": "Kvali"
+      },
+      {
         "command": "kvali.installClaudeHooks",
         "title": "Install Claude Code Hooks",
         "category": "Kvali"
@@ -103,6 +113,11 @@
         "command": "kvali.showLog",
         "title": "Show Log",
         "category": "Kvali"
+      },
+      {
+        "command": "kvali.reportProblem",
+        "title": "Report a Problem",
+        "category": "Kvali"
       }
     ],
     "menus": {
@@ -118,14 +133,24 @@
           "group": "navigation@2"
         },
         {
-          "command": "kvali.addProgressProtocol",
+          "command": "kvali.setup",
           "when": "view == kvali.sessions",
           "group": "more@1"
         },
         {
-          "command": "kvali.installClaudeHooks",
+          "command": "kvali.addProgressProtocol",
           "when": "view == kvali.sessions",
           "group": "more@2"
+        },
+        {
+          "command": "kvali.reportProblem",
+          "when": "view == kvali.sessions",
+          "group": "more@3"
+        },
+        {
+          "command": "kvali.turnOff",
+          "when": "view == kvali.sessions",
+          "group": "more@4"
         }
       ]
     },
@@ -144,6 +169,11 @@
           ],
           "default": "all",
           "description": "Which sessions the Agents view shows."
+        },
+        "kvali.autoPlan": {
+          "type": "boolean",
+          "default": true,
+          "description": "With the Claude Code hooks installed, ask Claude for a task list whenever a session has no unfinished plan (about 60 tokens per prompt, only while there is no plan)."
         },
         "kvali.activeWindowHours": {
           "type": "number",
@@ -188,7 +218,7 @@
         "kvali.cost.show": {
           "type": "boolean",
           "default": true,
-          "description": "Show estimated cost at API list prices. Subscription plans are not billed per token, so for them this is an API-equivalent estimate."
+          "description": "Show the API value of tokens: what they would cost at API list prices. Subscriptions are not billed per token."
         },
         "kvali.pricing": {
           "type": "object",
@@ -254,7 +284,8 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc -p . && tsc -p webview",
-    "package": "node esbuild.mjs --production && vsce package --no-dependencies --out kvali-0.1.0.vsix"
+    "package": "node esbuild.mjs --production && vsce package --no-dependencies --out kvali-0.3.0.vsix",
+    "vscode:uninstall": "node ./dist/uninstall.js"
   },
   "devDependencies": {
     "@kvali/core": "workspace:*",

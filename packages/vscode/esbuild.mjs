@@ -19,6 +19,16 @@ const builds = [
     logLevel: 'warning',
   },
   {
+    entryPoints: ['src/uninstall.ts'],
+    outfile: 'dist/uninstall.js',
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node20',
+    minify: production,
+    logLevel: 'warning',
+  },
+  {
     entryPoints: ['webview/main.tsx'],
     outfile: 'dist/webview/main.js',
     bundle: true,

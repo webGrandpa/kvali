@@ -49,18 +49,20 @@ model: gpt-5.5         # optional
 
 ## Telling agents to use it
 
-Run **Kvali: Add Progress Protocol to AGENTS.md** (or `kvali protocol` in a terminal). It appends this section to `AGENTS.md`, which most agents read automatically:
+Run **Kvali: Add Progress Protocol to AGENTS.md** (or `kvali protocol` in a terminal). It appends this section to `AGENTS.md`, which most agents read automatically, or brings an older copy of it up to date:
 
 ```md
 ## Progress reporting
 
 For any task that takes more than two steps, keep your plan visible so the user can follow progress without asking:
 
-- If you have a built-in plan or todo tool (Claude Code Tasks/TodoWrite, Codex `update_plan`, Gemini CLI `write_todos`, Antigravity `task.md`), create the plan before you start and update it as you go.
-- Otherwise, maintain `.agents/progress.md` in this format: …
+- If you have a built-in plan or todo tool (Claude Code Tasks/TodoWrite, Codex `update_plan`, Gemini CLI `write_todos`, Antigravity `task.md`), create the plan with it before you start, update it as you go, and do not create `.agents/progress.md`.
+- Only agents without such a tool maintain `.agents/progress.md`, in this format: …
 - Keep exactly one step marked `[/]`. Update the file right after each step, set `status: waiting` when you need input from the user, and `status: done` when everything is finished.
 ```
 
 ## Versioning
 
-The protocol is versioned by the marker comment `<!-- kvali:progress-protocol v1 -->` in AGENTS.md. Future versions will stay backwards compatible with v1 files.
+The file format above is v1, and Kvali will keep reading v1 files.
+
+The AGENTS.md section has its own marker comment (`<!-- kvali:progress-protocol v2 -->`). Running the command again replaces an older section with the current wording and leaves the rest of AGENTS.md untouched. A section whose closing `<!-- /kvali:progress-protocol -->` comment was removed is left alone.

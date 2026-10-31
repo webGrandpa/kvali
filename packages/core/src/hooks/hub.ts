@@ -32,6 +32,8 @@ export interface HookHubOptions {
   port?: number;
   liveDir: string;
   onEvent?: (agent: string, event: LiveEvent) => void;
+  /** Optional JSON reply for synchronous hooks (e.g. planning context). Must return quickly. */
+  respond?: (agent: string, event: LiveEvent) => object | undefined;
   onRoleChange?: (isHub: boolean) => void;
   log?: (message: string) => void;
   retryMs?: number;
@@ -136,8 +138,15 @@ export class HookHub {
       }
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
       const ev = normalizeHookPayload(m[1], body);
-      // Respond immediately with an empty 200: hooks treat that as "no decision".
-      res.writeHead(200).end();
+      // Answer right away. An empty 200 means "no decision"; a JSON body is read by synchronous hooks.
+      let reply: object | undefined;
+      try {
+        reply = ev ? this.opts.respond?.(m[1], ev) : undefined;
+      } catch {
+        reply = undefined;
+      }
+      if (reply) res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(reply));
+      else res.writeHead(200).end();
       if (!ev) return;
       await this.store(m[1], ev);
       this.opts.onEvent?.(m[1], ev);

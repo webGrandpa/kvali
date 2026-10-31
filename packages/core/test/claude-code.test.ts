@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { utimesSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { ClaudeCodeAdapter } from '../src/adapters/claude-code.ts';
@@ -72,6 +73,11 @@ test('Claude Code: tasks, activity, de-duplicated tokens, cost and status transi
     ],
   );
   assert.equal(progressOf(s.tasks).percent, 50);
+  assert.equal(s.turn?.steps, 5, 'five tool calls since the prompt');
+  assert.equal(s.current?.taskId, '2', 'the in-progress task is timed');
+  assert.equal(s.current?.steps, 1, 'one action (the test run) since task 2 started');
+  assert.equal(s.recent?.[0].label, 'Run the test suite');
+  assert.equal(s.recent?.[0].endedAt, undefined, 'still running');
   // 3 API responses, each written as several lines: usage must be counted once per response.
   assert.deepEqual(s.tokens, { input: 30, output: 600, cacheRead: 15_000, cacheWrite: 3_000, reasoning: 0 });
   // Opus 5.5: $4 in, $20 out, $0.20 cache read, $8 1h cache write (per MTok).
@@ -139,6 +145,35 @@ test('Claude Code: the tasks directory is authoritative and TodoWrite is a fallb
   s = await only(engine);
   assert.deepEqual(s.tasks.map((t) => t.title), ['Plan', 'Ship']);
   assert.equal(s.status, 'done');
+});
+
+test('Claude Code: after compaction the current step is timed from the task files', async () => {
+  const home = tmpHome();
+  const clock = new Clock('2026-10-30T10:00:00.000Z');
+  const t0 = clock.t;
+  // The plan was made before the conversation was compacted, so the transcript has no Task tools.
+  const taskDir = path.join(home, '.claude', 'tasks', SID);
+  const task = (id: string, status: string, atMin: number) => {
+    const f = path.join(taskDir, `${id}.json`);
+    writeText(f, JSON.stringify({ id, subject: `Step ${id}`, status, blocks: [], blockedBy: [] }));
+    utimesSync(f, new Date(t0 + atMin * 60_000), new Date(t0 + atMin * 60_000));
+  };
+  task('1', 'completed', 0);
+  task('2', 'completed', 6);
+  task('3', 'completed', 10);
+  task('4', 'completed', 10.05); // batch-completed with 3: not a duration
+  task('5', 'in_progress', 10.1);
+  task('6', 'pending', 0);
+  clock.advance(15 * 60_000);
+  writeJsonl(path.join(home, '.claude', 'projects', '-work-shop', `${SID}.jsonl`), [
+    { ...base(clock, -60_000), type: 'user', message: { role: 'user', content: 'This session is being continued from a previous conversation.' } },
+    ...assistant(clock, -30_000, 'a', [{ type: 'tool_use', id: 'tu_1', name: 'Bash', input: { command: 'pnpm build', description: 'Build' } }], 'tool_use'),
+  ]);
+  const s = await only(engineFor(new ClaudeCodeAdapter(), home, clock));
+  assert.equal(s.status, 'working');
+  assert.equal(s.current?.taskId, '5');
+  assert.equal(s.current?.startedAt, t0 + 10.1 * 60_000, 'the step started when its file changed');
+  assert.equal(s.current?.typicalMs, 5 * 60_000, 'median of 6m and 4m; the batch completion is skipped');
 });
 
 test('Claude Code: interrupts, staleness and injected text are handled', async () => {

@@ -50,11 +50,14 @@ export class StatusBar {
       const step = currentTask(s.tasks);
       const label = step?.activeTitle ?? step?.title ?? s.activity?.label;
       const tok = sessionTokens(s);
-      const parts = [p.total ? `${p.done}/${p.total} · ${p.percent}%` : s.agentLabel];
+      const parts = [p.total ? `${p.done}/${p.total} · ${p.percent}%` : s.turn ? `${s.agentLabel} · ${s.turn.steps} steps` : s.agentLabel];
       if (label) parts.push(short(label, 32));
       if (tok) parts.push(fmtTokens(tok));
       if (working.length > 1) parts.push(`+${working.length - 1}`);
-      this.item.text = `$(sync~spin) ${parts.join(' · ')}`;
+      const quiet = now - s.updatedAt;
+      const running = s.activity && !s.activity.endedAt && s.activity.kind !== 'thinking' && s.activity.kind !== 'message';
+      const stuck = (!!s.trouble && now - s.trouble.at < 15 * 60_000) || (!running && quiet > 5 * 60_000);
+      this.item.text = `${stuck ? '$(warning)' : '$(sync~spin)'} ${parts.join(' · ')}${stuck ? ` · quiet ${Math.round(quiet / 60_000)}m` : ''}`;
     } else {
       const recent = ws.find((s) => now - s.updatedAt < RECENT_MS);
       if (recent) {
@@ -85,7 +88,7 @@ export class StatusBar {
         STATUS_LABEL[s.status],
         p.total ? `${p.done}/${p.total} tasks (${p.percent}%)` : undefined,
         tok ? `${fmtTokens(tok)} tokens` : undefined,
-        showCost && s.costUsd !== undefined ? `≈${fmtUsd(s.costUsd)}` : undefined,
+        showCost && s.costUsd !== undefined ? `API value ${fmtUsd(s.costUsd)}` : undefined,
       ].filter(Boolean);
       const esc = (t: string) => t.replace(/[\\`*_[\]<>|]/g, (c) => `\\${c}`);
       md.appendMarkdown(`**${esc(s.agentLabel)}** · ${esc(short(s.title, 60))}  \n${bits.join(' · ')}\n\n`);
