@@ -1,0 +1,38 @@
+{
+  "name": "@kvali/cli",
+  "version": "0.1.0",
+  "description": "Terminal dashboard for AI coding agents: live task progress, tokens and cost for Claude Code, Codex, Gemini CLI, Antigravity and more.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "kvali": "dist/kvali.mjs"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/webGrandpa/kvali.git",
+    "directory": "packages/cli"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "gemini-cli",
+    "antigravity",
+    "ai-agents",
+    "progress",
+    "tokens",
+    "cli"
+  ],
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/kvali.mjs --banner:js=\"#!/usr/bin/env node\" --log-level=warning",
+    "typecheck": "tsc -p ."
+  },
+  "devDependencies": {
+    "@kvali/core": "workspace:*"
+  }
+}

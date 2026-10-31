@@ -1,0 +1,265 @@
+{
+  "name": "kvali",
+  "displayName": "Kvali — AI Agent Progress & Tokens",
+  "description": "One progress bar for every AI coding agent: live task progress, current step, tokens, cost and plan limits for Claude Code, Codex, Gemini CLI, Antigravity and any agent that reads AGENTS.md.",
+  "version": "0.1.0",
+  "publisher": "webgrandpa",
+  "author": {
+    "name": "Giorgi Khiladze",
+    "url": "https://github.com/webGrandpa"
+  },
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#1b1d23",
+    "theme": "dark"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/webGrandpa/kvali.git"
+  },
+  "bugs": {
+    "url": "https://github.com/webGrandpa/kvali/issues"
+  },
+  "homepage": "https://github.com/webGrandpa/kvali#readme",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Visualization",
+    "Other"
+  ],
+  "keywords": [
+    "claude code",
+    "codex",
+    "gemini cli",
+    "antigravity",
+    "ai agent",
+    "progress",
+    "tokens",
+    "usage",
+    "cost",
+    "cursor"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "kvali",
+          "title": "Kvali",
+          "icon": "media/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "kvali": [
+        {
+          "type": "webview",
+          "id": "kvali.sessions",
+          "name": "Agents",
+          "icon": "media/activity.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "kvali.show",
+        "title": "Show Agents",
+        "category": "Kvali"
+      },
+      {
+        "command": "kvali.refresh",
+        "title": "Refresh",
+        "category": "Kvali",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "kvali.toggleScope",
+        "title": "Toggle This Workspace / All Projects",
+        "category": "Kvali",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "kvali.installClaudeHooks",
+        "title": "Install Claude Code Hooks",
+        "category": "Kvali"
+      },
+      {
+        "command": "kvali.uninstallClaudeHooks",
+        "title": "Remove Claude Code Hooks",
+        "category": "Kvali"
+      },
+      {
+        "command": "kvali.addProgressProtocol",
+        "title": "Add Progress Protocol to AGENTS.md",
+        "category": "Kvali"
+      },
+      {
+        "command": "kvali.showLog",
+        "title": "Show Log",
+        "category": "Kvali"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "kvali.toggleScope",
+          "when": "view == kvali.sessions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "kvali.refresh",
+          "when": "view == kvali.sessions",
+          "group": "navigation@2"
+        },
+        {
+          "command": "kvali.addProgressProtocol",
+          "when": "view == kvali.sessions",
+          "group": "more@1"
+        },
+        {
+          "command": "kvali.installClaudeHooks",
+          "when": "view == kvali.sessions",
+          "group": "more@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Kvali",
+      "properties": {
+        "kvali.scope": {
+          "type": "string",
+          "enum": [
+            "all",
+            "workspace"
+          ],
+          "enumDescriptions": [
+            "Show sessions from every project; this workspace comes first.",
+            "Only show sessions that run inside this workspace."
+          ],
+          "default": "all",
+          "description": "Which sessions the Agents view shows."
+        },
+        "kvali.activeWindowHours": {
+          "type": "number",
+          "default": 24,
+          "minimum": 1,
+          "maximum": 720,
+          "description": "Show sessions that were active within this many hours."
+        },
+        "kvali.staleAfterMinutes": {
+          "type": "number",
+          "default": 30,
+          "minimum": 5,
+          "description": "A working session with no activity for this long is shown as stale."
+        },
+        "kvali.pollIntervalMs": {
+          "type": "number",
+          "default": 1500,
+          "minimum": 500,
+          "maximum": 30000,
+          "description": "How often agent files are checked for changes."
+        },
+        "kvali.statusBar.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the most relevant agent of this workspace in the status bar."
+        },
+        "kvali.notifications.onFinish": {
+          "type": "boolean",
+          "default": true,
+          "description": "Notify when an agent finishes its turn."
+        },
+        "kvali.notifications.onNeedsInput": {
+          "type": "boolean",
+          "default": true,
+          "description": "Notify when an agent is waiting for your approval or answer."
+        },
+        "kvali.notifications.system": {
+          "type": "boolean",
+          "default": true,
+          "description": "When the editor is in the background, also show an operating-system notification (macOS Notification Center, Linux notify-send)."
+        },
+        "kvali.cost.show": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show estimated cost at API list prices. Subscription plans are not billed per token, so for them this is an API-equivalent estimate."
+        },
+        "kvali.pricing": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "input": {
+                "type": "number"
+              },
+              "output": {
+                "type": "number"
+              },
+              "cacheRead": {
+                "type": "number"
+              },
+              "cacheWrite5m": {
+                "type": "number"
+              },
+              "cacheWrite1h": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "input",
+              "output"
+            ]
+          },
+          "markdownDescription": "Custom prices in USD per million tokens, keyed by model id or `*` glob, for example `{ \"gpt-5.5*\": { \"input\": 1.25, \"output\": 10, \"cacheRead\": 0.125 } }`. Anthropic models are priced out of the box."
+        },
+        "kvali.agents.disabled": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "claude-code",
+              "codex",
+              "gemini-cli",
+              "antigravity",
+              "progress-file"
+            ]
+          },
+          "default": [],
+          "description": "Agents Kvali should not read."
+        },
+        "kvali.antigravity.brainDirs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra Antigravity brain directories to read, in addition to ~/.gemini/antigravity-ide/brain and ~/.gemini/antigravity/brain."
+        },
+        "kvali.hooks.port": {
+          "type": "number",
+          "default": 47821,
+          "description": "Local port that agent hooks send events to (127.0.0.1 only). Reinstall the hooks after changing it."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc -p . && tsc -p webview",
+    "package": "node esbuild.mjs --production && vsce package --no-dependencies --out kvali-0.1.0.vsix"
+  },
+  "devDependencies": {
+    "@kvali/core": "workspace:*",
+    "@types/vscode": "1.90.0",
+    "@vscode/vsce": "3.9.2",
+    "preact": "10.29.8"
+  }
+}
