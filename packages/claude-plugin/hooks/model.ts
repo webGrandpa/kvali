@@ -351,9 +351,11 @@ export const projectSlug = (dir: string): string => dir.replace(/[^a-zA-Z0-9]/g,
 
 // ---------- phone notifications (shared setup in ~/.kvali/config.json) ----------
 
-export type PhoneEvent = 'needs-you' | 'done' | 'error' | 'stuck' | 'steps'
-export type PhoneCfg = { server: string; topic: string; token?: string; events: PhoneEvent[]; details: boolean }
-const PHONE_EVENTS: readonly PhoneEvent[] = ['needs-you', 'done', 'error', 'stuck', 'steps']
+export type PhoneEvent = 'needs-you' | 'done' | 'error' | 'stuck' | 'steps' | 'actions'
+/** `doneAfterSec`: a turn's end is pushed when it took at least this long (0: every turn), or when the phone followed it. */
+export type PhoneCfg = { server: string; topic: string; token?: string; events: PhoneEvent[]; details: boolean; doneAfterSec: number }
+const PHONE_EVENTS: readonly PhoneEvent[] = ['needs-you', 'done', 'steps', 'actions', 'error', 'stuck']
+const DEFAULT_EVENTS: readonly PhoneEvent[] = ['needs-you', 'done', 'error', 'stuck', 'steps']
 
 /** Kvali 0.5 saved this list as its default, before progress existed: it reads as today's default. */
 const DEFAULT_EVENTS_V1: readonly PhoneEvent[] = ['needs-you', 'done', 'error', 'stuck']
@@ -368,10 +370,26 @@ export function parsePhoneConfig(text: string): PhoneCfg | undefined {
   }
   if (typeof r.topic !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(r.topic)) return undefined
   const server = typeof r.server === 'string' && /^https?:\/\/[^\s/]/.test(r.server) ? r.server.replace(/\/+$/, '') : 'https://ntfy.sh'
-  let events = Array.isArray(r.events) ? r.events.filter((e): e is PhoneEvent => PHONE_EVENTS.includes(e as PhoneEvent)) : [...PHONE_EVENTS]
+  let events = Array.isArray(r.events) ? r.events.filter((e): e is PhoneEvent => PHONE_EVENTS.includes(e as PhoneEvent)) : [...DEFAULT_EVENTS]
   const v1Default = events.length === DEFAULT_EVENTS_V1.length && DEFAULT_EVENTS_V1.every(e => events.includes(e))
-  if (r.v === undefined && v1Default) events = [...PHONE_EVENTS]
-  return { server, topic: r.topic, token: typeof r.token === 'string' && r.token ? r.token : undefined, events, details: r.details !== false }
+  if (r.v === undefined && v1Default) events = [...DEFAULT_EVENTS]
+  const doneAfterSec = typeof r.doneAfter === 'number' && Number.isFinite(r.doneAfter) && r.doneAfter >= 0 ? Math.min(Math.round(r.doneAfter), 86_400) : 120
+  return { server, topic: r.topic, token: typeof r.token === 'string' && r.token ? r.token : undefined, events, details: r.details !== false, doneAfterSec }
+}
+
+/** Silent updates pause while fewer messages than this are left for the day, so alerts still get through. */
+export const QUIET_RESERVE = 50
+
+/** Messages left for today from ntfy's `GET /v1/account`, when the server limits them (ntfy.sh: 250 a day per address). */
+export function messagesLeftOf(text: string): number | undefined {
+  try {
+    const a = JSON.parse(text) as { limits?: { messages?: number }; stats?: { messages_remaining?: number } }
+    const limit = a?.limits?.messages
+    const left = a?.stats?.messages_remaining
+    return typeof limit === 'number' && limit > 0 && typeof left === 'number' ? left : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** `sequence`: the notification it replaces (ntfy's sequence ID), so a turn's progress and its end are one notification. */
@@ -381,7 +399,7 @@ export type PushKind = 'needs-you' | 'finished' | 'paused' | 'error' | 'stalled'
 /** The words of a push, the same as the extension's. Without details no project or step names leave the computer. */
 export function phonePush(
   kind: PushKind,
-  info: { project: string; plan: KvPlan; label?: string; workedMs?: number; tokens?: number; quietMs?: number },
+  info: { project: string; plan: KvPlan; label?: string; workedMs?: number; tokens?: number; quietMs?: number; doing?: string },
   details: boolean,
 ): PhonePush {
   const where = details && info.project ? ` · ${info.project}` : ''
@@ -411,9 +429,16 @@ export function phonePush(
       }
     case 'step':
     {
+      // The turn's live notification: the plan's progress and, when chosen, the action running now.
       const next = step ? undefined : info.plan.tasks.find(t => t.status === 'pending')?.title
       const line = details ? (step ? `Now: ${truncate(step, 120)}` : next ? `Next: ${truncate(next, 120)}` : undefined) : undefined
-      return { title: `Claude Code${where} · ${p.done}/${p.total}`, message: lines(`${phoneBar(p.done, p.total)} ${p.percent}%`, line), priority: 2, tags: ['arrow_forward'] }
+      const doing = details && info.doing ? `Doing: ${truncate(info.doing, 120)}` : undefined
+      return {
+        title: p.total ? `Claude Code${where} · ${p.done}/${p.total}` : `Claude Code${where} · working`,
+        message: lines(p.total ? `${phoneBar(p.done, p.total)} ${p.percent}%` : undefined, line, doing) || 'Working',
+        priority: 2,
+        tags: ['arrow_forward'],
+      }
     }
   }
 }

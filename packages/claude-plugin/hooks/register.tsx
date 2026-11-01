@@ -36,6 +36,8 @@ import {
   totalTokens,
   turnSequence,
   typicalMs,
+  messagesLeftOf,
+  QUIET_RESERVE,
   type PhoneCfg,
   type PushKind,
 } from './model'
@@ -114,6 +116,12 @@ type Runtime = {
   progressSent: boolean
   /** A turn that stopped in the middle of its plan: pushed once it has waited like a question. */
   pendingPause: { at: number; workedMs: number; sequence?: string } | undefined
+  /** The last live update (a step or an action) and the action it showed. */
+  lastLivePushAt: number
+  sentAction: string | undefined
+  /** Messages the ntfy server still allows today (checked once a minute), to keep room for alerts. */
+  budgetAt: number
+  budgetLeft: number | undefined
   /** Ask Claude for a plan while there is none (`autoPlan` in ~/.kvali/config.json). */
   autoPlan: boolean
 }
@@ -151,6 +159,10 @@ const fresh = (): Runtime => ({
   progressSeenAt: 0,
   progressSent: false,
   pendingPause: undefined,
+  lastLivePushAt: 0,
+  sentAction: undefined,
+  budgetAt: -Infinity,
+  budgetLeft: undefined,
   autoPlan: true,
 })
 
@@ -209,7 +221,8 @@ async function doRefresh($: Engine, force: boolean): Promise<void> {
     quiet(push($, 'paused', { workedMs, sequence }))
   }
   const current = await read($, plan)
-  if (progressDue(current, now)) quiet(push($, 'step', { sequence: turnSeq(now) }))
+  const news = liveDue(current, now)
+  if (news) quiet(push($, 'step', { sequence: turnSeq(now), doing: news.doing }))
   const key = [l.phase, l.since, l.label ?? '', l.detail ?? ''].join('|')
   if (key !== rt.lastLiveKey || force) {
     rt.lastLiveKey = key
@@ -230,20 +243,53 @@ async function doRefresh($: Engine, force: boolean): Promise<void> {
  * count waits a moment first: Claude marks a task done and the next one in progress in two
  * calls, and the update should name the next one.
  */
-function progressDue(p: KvPlan, now: number): boolean {
+function liveDue(p: KvPlan, now: number): { doing?: string } | undefined {
   const pr = progress(p.tasks)
   if (pr.done < rt.progressSentDone) rt.progressSentDone = pr.done // a new plan
   if (pr.done !== rt.progressSeenDone) {
     rt.progressSeenDone = pr.done
     rt.progressSeenAt = now
   }
-  if (!rt.turnActive || !rt.phone?.events.includes('steps')) return false
-  if (pr.total === 0 || pr.done <= rt.progressSentDone || pr.done >= pr.total) return false
-  if (now - rt.lastStepPushAt < 60_000 || now - rt.progressSeenAt < 1_500) return false
-  rt.lastStepPushAt = now
-  rt.progressSentDone = pr.done
+  const events = rt.phone?.events ?? []
+  if (!rt.turnActive) return undefined
+  const stepNews =
+    events.includes('steps') &&
+    pr.total > 0 &&
+    pr.done > rt.progressSentDone &&
+    pr.done < pr.total &&
+    now - rt.lastStepPushAt >= 60_000 &&
+    now - rt.progressSeenAt >= 1_500
+  // With actions chosen: what runs now, at most twice a minute.
+  const action = [...rt.running.values()].filter(r => !r.asks).pop()
+  const actionKey = action ? `${action.label}|${action.startedAt}` : undefined
+  const actionNews = events.includes('actions') && actionKey !== undefined && actionKey !== rt.sentAction && now - rt.lastLivePushAt >= 30_000
+  if (!stepNews && !actionNews) return undefined
+  rt.lastLivePushAt = now
+  if (stepNews) {
+    rt.lastStepPushAt = now
+    rt.progressSentDone = pr.done
+  }
+  if (actionKey !== undefined) rt.sentAction = actionKey
   rt.progressSent = true
-  return true
+  return { doing: events.includes('actions') ? action?.label : undefined }
+}
+
+/** Silent updates are worth a message only while the day's allowance keeps room for alerts. */
+async function quietAllowed($: Engine, cfg: PhoneCfg): Promise<boolean> {
+  const now = await $.clock.now()
+  if (now - rt.budgetAt >= 60_000) {
+    rt.budgetAt = now
+    rt.budgetLeft = undefined
+    const headers: Record<string, string> = { Accept: 'application/json' }
+    if (cfg.token) headers.Authorization = `Bearer ${cfg.token}`
+    try {
+      const res = await $.http.fetch(`${cfg.server}/v1/account`, { headers })
+      if (res.ok) rt.budgetLeft = messagesLeftOf(res.text)
+    } catch {
+      // unknown: no limit to keep to
+    }
+  }
+  return rt.budgetLeft === undefined || rt.budgetLeft > QUIET_RESERVE
 }
 
 function turnSeq(now: number): string {
@@ -359,9 +405,12 @@ const PUSH_EVENT: Record<PushKind, 'needs-you' | 'done' | 'error' | 'stuck' | 's
 }
 
 /** Sends one push to the phone; a failure only costs that push. */
-async function push($: Engine, kind: PushKind, extra: { label?: string; workedMs?: number; quietMs?: number; sequence?: string } = {}): Promise<void> {
+async function push($: Engine, kind: PushKind, extra: { label?: string; workedMs?: number; quietMs?: number; sequence?: string; doing?: string } = {}): Promise<void> {
   const cfg = rt.phone
-  if (!cfg || !cfg.events.includes(PUSH_EVENT[kind])) return
+  if (!cfg) return
+  const wanted = kind === 'step' ? cfg.events.includes('steps') || cfg.events.includes('actions') : cfg.events.includes(PUSH_EVENT[kind])
+  if (!wanted) return
+  if (kind === 'step' && !(await quietAllowed($, cfg))) return
   const p = await read($, plan)
   const u = await read($, usage)
   const { sequence, ...info } = extra
@@ -369,7 +418,8 @@ async function push($: Engine, kind: PushKind, extra: { label?: string; workedMs
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (cfg.token) headers.Authorization = `Bearer ${cfg.token}`
   try {
-    await $.http.fetch(cfg.server, { method: 'POST', headers, body })
+    const res = await $.http.fetch(cfg.server, { method: 'POST', headers, body })
+    if (res.ok && rt.budgetLeft !== undefined) rt.budgetLeft -= 1
   } catch {
     // offline or refused by policy: the pane still shows it
   }
@@ -558,7 +608,7 @@ export const register: Register = on => {
     if (phase === 'error') quiet(push($, 'error', { label: rt.ended.label, sequence }))
     // A turn the phone followed always gets its end; other turns only when they were long.
     // A stop in the middle of the plan asks the person something, so it waits like a question.
-    if (phase === 'done' && (e.durationMs >= LONG_TURN_MS || followed)) {
+    if (phase === 'done' && (e.durationMs >= (rt.phone?.doneAfterSec ?? 120) * 1000 || followed)) {
       const pr = progress((await read($, plan)).tasks)
       if (pr.total > 0 && pr.done < pr.total) rt.pendingPause = { at: now, workedMs: e.durationMs, sequence }
       else quiet(push($, 'finished', { workedMs: e.durationMs, sequence }))

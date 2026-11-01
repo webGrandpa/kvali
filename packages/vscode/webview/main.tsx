@@ -490,11 +490,20 @@ function Qr({ text, size = 168 }: { text: string; size?: number }) {
 }
 
 /** In the order the sentence reads best. */
-const PHONE_ALERT_LABEL: [string, string][] = [
-  ['done', 'finishes'],
-  ['error', 'fails'],
-  ['stuck', 'goes silent'],
-  ['needs-you', 'has waited a minute for your answer'],
+/** What the phone can hear about, in the order the card lists it. Silent ones update the task's one live notification. */
+const PHONE_CHOICES: { event: string; label: string; hint?: string }[] = [
+  { event: 'needs-you', label: 'A question has waited a minute for my answer' },
+  { event: 'done', label: 'A task is done' },
+  { event: 'steps', label: 'Each finished step of the plan', hint: 'silent' },
+  { event: 'actions', label: 'Every action, live', hint: 'silent, at most twice a minute' },
+  { event: 'error', label: 'An error stopped the agent' },
+  { event: 'stuck', label: 'The agent went silent or stopped responding' },
+];
+const DONE_AFTER: [number, string][] = [
+  [0, 'any length'],
+  [30, '30 s or longer'],
+  [120, '2 min or longer'],
+  [300, '5 min or longer'],
 ];
 
 function PhoneCard({ phone }: { phone: PhoneView }) {
@@ -503,8 +512,8 @@ function PhoneCard({ phone }: { phone: PhoneView }) {
   useEffect(() => {
     ref.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, []);
-  const alerts = PHONE_ALERT_LABEL.filter(([e]) => phone.events.includes(e as PhoneView['events'][number])).map(([, label]) => label);
-  const progress = phone.events.includes('steps');
+  const save = (events: string[], doneAfterSec = phone.doneAfterSec) => post({ type: 'phoneEvents', events, doneAfterSec });
+  const toggle = (event: string, on: boolean) => save(on ? [...phone.events.filter((e) => e !== event), event] : phone.events.filter((e) => e !== event));
   const self = !/^https:\/\/ntfy\.sh$/.test(phone.server);
   return (
     <aside class="setup phone" aria-label="Phone notifications" ref={ref}>
@@ -528,14 +537,32 @@ function PhoneCard({ phone }: { phone: PhoneView }) {
           Copy
         </button>
       </p>
-      <label class="phone-progress">
-        <input type="checkbox" checked={progress} onChange={(e) => post({ type: 'phoneProgress', on: (e.currentTarget as HTMLInputElement).checked })} />
-        <span>
-          <b>Progress</b>: a silent notification per task that each finished step updates (on an iPhone each update is listed)
-        </span>
-      </label>
+      <fieldset class="phone-events">
+        <legend>Notify me when</legend>
+        {PHONE_CHOICES.map((c) => (
+          <label class="phone-choice">
+            <input type="checkbox" checked={phone.events.includes(c.event)} onChange={(e) => toggle(c.event, (e.currentTarget as HTMLInputElement).checked)} />
+            <span>
+              {c.label}
+              {c.hint ? <span class="muted"> ({c.hint})</span> : null}
+              {c.event === 'done' ? (
+                <select
+                  aria-label="Shortest task worth a notification"
+                  value={String(phone.doneAfterSec)}
+                  disabled={!phone.events.includes('done')}
+                  onChange={(e) => save(phone.events, Number((e.currentTarget as HTMLSelectElement).value))}
+                >
+                  {DONE_AFTER.map(([sec, label]) => (
+                    <option value={String(sec)}>{label}</option>
+                  ))}
+                </select>
+              ) : null}
+            </span>
+          </label>
+        ))}
+      </fieldset>
       <p class="muted small">
-        {alerts.length ? `An alert when an agent ${alerts.length > 1 ? `${alerts.slice(0, -1).join(', ')} or ${alerts.at(-1)}` : alerts[0]}. ` : ''}The topic name is the key: keep it to yourself.
+        Steps and actions share one silent notification per task, which its end replaces (on an iPhone each update is listed). The topic name is the key: keep it to yourself.
         {phone.details ? ' Notifications name the project and the step; never code or prompts.' : ' Notifications leave out project and step names.'}
       </p>
       <div class="setup-actions">

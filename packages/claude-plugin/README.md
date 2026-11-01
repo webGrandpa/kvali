@@ -13,7 +13,7 @@ It works wherever Claude Code runs: the terminal, the desktop app, the VS Code e
 
 ## On your phone
 
-With phone notifications set up (`kvali phone` or **Kvali: Send Notifications to My Phone** in the editor), the plugin sends this session's pushes through ntfy by itself, no editor needed: the turn's progress through its plan as one silent notification that each finished step updates (at most once a minute) and the turn's end replaces, and alerts when a question has waited a minute for your answer (one answered at the computer sends nothing), a turn of two minutes or more (or one whose progress you followed) finished, or stopped mid-plan and waited a minute, an error, or no data from the API. It reads the shared setup in `~/.kvali/config.json` once a minute.
+With phone notifications set up (`kvali phone` or **Kvali: Send Notifications to My Phone** in the editor), the plugin sends this session's pushes through ntfy by itself, no editor needed: the turn's progress through its plan as one silent notification that each finished step updates (at most once a minute) and the turn's end replaces, and alerts when a question has waited a minute for your answer (one answered at the computer sends nothing), a turn of two minutes or more (or one whose progress you followed) finished, or stopped mid-plan and waited a minute, an error, or no data from the API. It follows the choices made in Kvali's phone card or with `kvali phone --events` (each finished step, every action live, every task or only longer ones) and reads the shared setup in `~/.kvali/config.json` once a minute.
 
 ## With the Kvali editor extension
 

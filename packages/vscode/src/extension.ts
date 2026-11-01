@@ -29,10 +29,12 @@ import {
   testPush,
   uninstallClaudeHooks,
   writePhoneConfig,
+  DEFAULT_DONE_AFTER_SEC,
+  DONE_AFTER_CHOICES,
+  PHONE_EVENTS,
   type AgentSession,
   type DetectedAgents,
   type HookStatus,
-  type PhoneEvent,
   type SetupOptions,
   type Snapshot,
 } from '@kvali/core';
@@ -354,11 +356,13 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
         phoneCard = true;
         pushState();
         return;
-      case 'phoneProgress': {
+      case 'phoneEvents': {
+        // What the phone hears about, chosen in the panel.
         const cfg = await readPhoneConfig(home);
-        if (!cfg) return;
-        const events: PhoneEvent[] = m.on ? [...cfg.events.filter((e) => e !== 'steps'), 'steps'] : cfg.events.filter((e) => e !== 'steps');
-        await writePhoneConfig(home, { ...cfg, events });
+        if (!cfg || !Array.isArray(m.events)) return;
+        const events = PHONE_EVENTS.filter((e) => m.events.includes(e));
+        const doneAfterSec = DONE_AFTER_CHOICES.includes(m.doneAfterSec) ? m.doneAfterSec : (cfg.doneAfterSec ?? DEFAULT_DONE_AFTER_SEC);
+        await writePhoneConfig(home, { ...cfg, events, doneAfterSec });
         await phone.reload(true);
         pushState();
         return;

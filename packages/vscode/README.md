@@ -9,7 +9,7 @@
 - **Progress to 100%** from the agent's own plan (Claude Code Tasks, Codex `update_plan`, Gemini `write_todos`, Antigravity `task.md`, or the [progress protocol](https://github.com/webGrandpa/kvali/blob/main/docs/PROTOCOL.md)).
 - **What it is doing right now**: the step, the tool or command, and for how long.
 - **Needs you**: permission prompts and questions in the status bar and as notifications, including OS notifications when the editor is in the background.
-- **On your phone**: click **Get alerts on your phone** at the top of the Kvali view and scan the QR code with the free ntfy app: each task's progress as one silent notification, and an alert when an agent finishes, fails, goes quiet or has waited a minute for your answer.
+- **On your phone**: click **Get alerts on your phone** at the top of the Kvali view and scan the QR code with the free ntfy app. Choose what reaches it: each finished step or every action as one silent live notification per task, a task done, an error, an agent gone silent, a question that waited a minute.
 - **Tokens and API value** per session, project and day, with context-window usage. Anthropic prices are built in; set `kvali.pricing` for other models.
 - **Plan limits**: 5-hour and weekly usage for Codex subscriptions.
 - **All projects in one place**, this workspace first. **Resume** a finished Claude Code or Codex session in a terminal with one click.

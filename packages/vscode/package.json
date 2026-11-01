@@ -2,7 +2,7 @@
   "name": "kvali",
   "displayName": "Kvali — AI Agent Progress",
   "description": "One progress bar for all your AI coding agents: plan progress, the current step, usage and alerts on your phone, grouped by project. Local and read-only.",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "publisher": "webgrandpa",
   "author": {
     "name": "Giorgi Khiladze",

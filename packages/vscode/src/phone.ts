@@ -1,5 +1,5 @@
 import type * as vscode from 'vscode';
-import { PhoneNotifier, subscribeLink, type PhoneConfig, type Snapshot } from '@kvali/core';
+import { DEFAULT_DONE_AFTER_SEC, PhoneNotifier, subscribeLink, type PhoneConfig, type Snapshot } from '@kvali/core';
 import type { PhoneView } from './messages.ts';
 
 /**
@@ -27,7 +27,9 @@ export class PhoneSender {
 
   view(): PhoneView | undefined {
     const c = this.notifier.config;
-    return c ? { server: c.server, topic: c.topic, link: subscribeLink(c), events: c.events, details: c.details } : undefined;
+    return c
+      ? { server: c.server, topic: c.topic, link: subscribeLink(c), events: c.events, details: c.details, doneAfterSec: c.doneAfterSec ?? DEFAULT_DONE_AFTER_SEC }
+      : undefined;
   }
 
   /** Re-reads `~/.kvali/config.json` when it changed (the CLI or another window may have set it up). */

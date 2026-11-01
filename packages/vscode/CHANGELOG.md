@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.2 — 2026-11-01
+
+- **Choose what reaches your phone.** The phone card has a checkbox for each kind of notification: a question that waited a minute, a task done, each finished step, every action, an error, an agent gone silent, and how long a task must be to be worth one (any length, 30 s, 2 min or 5 min). In a terminal: `kvali phone --events needs-you,done,steps,actions,error,stuck --done-after 30`. The Claude Code plugin follows the same choices.
+- **Every action, live**: what the agent is running right now, in the task's one silent notification, at most twice a minute.
+- ntfy.sh allows 250 notifications a day per network address. When fewer than 50 are left, Kvali pauses the silent updates so alerts still get through.
+
 ## 0.6.1 — 2026-10-31
 
 - The extension's listing has a plainer name and keywords: "Kvali — AI Agent Progress".

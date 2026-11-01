@@ -27,7 +27,7 @@ kvali watch            # hooks and phone notifications only, e.g. in the backgro
 
 ## More
 
-- `kvali phone test` / `kvali phone off`; options `--private` (no project or step names in notifications), `--no-steps` (alerts only, no progress notifications), `--server <url>` for your own ntfy server.
+- `kvali phone test` / `kvali phone off`; options `--events needs-you,done,steps,actions,error,stuck` (what reaches the phone), `--done-after <seconds>` (the shortest task worth a notification; 0: every task), `--private` (no project or step names in notifications), `--server <url>` for your own ntfy server.
 - `kvali protocol [dir]` adds the progress protocol to a repository's `AGENTS.md` for agents Kvali has no adapter for (Cursor, Copilot, …).
 - `kvali --help` lists everything.
 

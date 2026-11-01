@@ -12,8 +12,16 @@ import path from 'node:path';
 import { fmtDuration, fmtTokens, projectName, sessionTokens } from './format.ts';
 import { currentTask, progressOf, type AgentSession, type SessionStatus, type Snapshot } from './model.ts';
 
-export type PhoneEvent = 'needs-you' | 'done' | 'error' | 'stuck' | 'steps';
-export const PHONE_EVENTS: readonly PhoneEvent[] = ['needs-you', 'done', 'error', 'stuck', 'steps'];
+/**
+ * What the phone hears about, each chosen by the person:
+ * - `needs-you`: a question (or a stop in the middle of a plan) has waited a minute.
+ * - `done`: a task finished, when it worked at least `doneAfterSec` (or the phone followed it).
+ * - `steps`: each finished plan step, as the task's silent live notification.
+ * - `actions`: what the agent is doing right now, in that same live notification.
+ * - `error`, `stuck`: an error stopped the agent; it went silent or stopped responding.
+ */
+export type PhoneEvent = 'needs-you' | 'done' | 'error' | 'stuck' | 'steps' | 'actions';
+export const PHONE_EVENTS: readonly PhoneEvent[] = ['needs-you', 'done', 'steps', 'actions', 'error', 'stuck'];
 /**
  * Progress (`steps`) is on: it is one silent notification per task that each finished step
  * updates in place (Android; the iPhone app lists each update, silently) and the task's end
@@ -24,6 +32,10 @@ export const DEFAULT_PHONE_EVENTS: PhoneEvent[] = ['needs-you', 'done', 'error',
 const DEFAULT_EVENTS_V1: readonly PhoneEvent[] = ['needs-you', 'done', 'error', 'stuck'];
 const PHONE_CONFIG_VERSION = 2;
 export const DEFAULT_NTFY_SERVER = 'https://ntfy.sh';
+/** A task's end is pushed when it worked at least this long (seconds), unless the person chose otherwise. */
+export const DEFAULT_DONE_AFTER_SEC = 120;
+/** The task lengths offered in the editor: every task, 30 seconds, 2 minutes, 5 minutes. */
+export const DONE_AFTER_CHOICES: readonly number[] = [0, 30, 120, 300];
 
 export interface PhoneConfig {
   server: string;
@@ -33,6 +45,11 @@ export interface PhoneConfig {
   events: PhoneEvent[];
   /** Include project, task and step names. Off: only the agent and what happened. */
   details: boolean;
+  /**
+   * `done` is pushed for a task that worked at least this many seconds (0: every task), and
+   * always for one whose progress the phone followed. Unset: DEFAULT_DONE_AFTER_SEC.
+   */
+  doneAfterSec?: number;
 }
 
 export const kvaliConfigFile = (home: string): string => path.join(home, '.kvali', 'config.json');
@@ -49,7 +66,9 @@ export function normalizePhoneConfig(raw: unknown): PhoneConfig | undefined {
     : [...DEFAULT_PHONE_EVENTS];
   const v1Default = events.length === DEFAULT_EVENTS_V1.length && DEFAULT_EVENTS_V1.every((e) => events.includes(e));
   if (r.v === undefined && v1Default) events = [...DEFAULT_PHONE_EVENTS];
-  return { server, topic: r.topic, token: typeof r.token === 'string' && r.token ? r.token : undefined, events, details: r.details !== false };
+  const doneAfterSec =
+    typeof r.doneAfter === 'number' && Number.isFinite(r.doneAfter) && r.doneAfter >= 0 ? Math.min(Math.round(r.doneAfter), 86_400) : DEFAULT_DONE_AFTER_SEC;
+  return { server, topic: r.topic, token: typeof r.token === 'string' && r.token ? r.token : undefined, events, details: r.details !== false, doneAfterSec };
 }
 
 export async function readPhoneConfig(home: string): Promise<PhoneConfig | undefined> {
@@ -74,7 +93,16 @@ export async function writePhoneConfig(home: string, cfg: PhoneConfig | undefine
   } catch {
     // new file
   }
-  if (cfg) all.phone = { v: PHONE_CONFIG_VERSION, server: cfg.server, topic: cfg.topic, ...(cfg.token ? { token: cfg.token } : {}), events: cfg.events, details: cfg.details };
+  if (cfg)
+    all.phone = {
+      v: PHONE_CONFIG_VERSION,
+      server: cfg.server,
+      topic: cfg.topic,
+      ...(cfg.token ? { token: cfg.token } : {}),
+      events: cfg.events,
+      details: cfg.details,
+      doneAfter: cfg.doneAfterSec ?? DEFAULT_DONE_AFTER_SEC,
+    };
   else delete all.phone;
   await fsp.mkdir(path.dirname(file), { recursive: true });
   await fsp.writeFile(file, `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600 });
@@ -198,7 +226,7 @@ function clip(text: string, max: number): string {
 type Kind = 'needs-you' | 'error' | 'finished' | 'paused' | 'gone' | 'trouble' | 'quiet' | 'step';
 
 /** The words of a push. Without details, no project, task or step names leave the computer. */
-export function formatPush(kind: Kind, s: AgentSession, details: boolean, extra: { workedMs?: number; quietMs?: number } = {}): PhonePush {
+export function formatPush(kind: Kind, s: AgentSession, details: boolean, extra: { workedMs?: number; quietMs?: number; action?: boolean } = {}): PhonePush {
   const agent = s.agentLabel;
   const where = details ? ` · ${projectName(s.projectPath)}` : '';
   const p = progressOf(s.tasks);
@@ -267,14 +295,18 @@ export function formatPush(kind: Kind, s: AgentSession, details: boolean, extra:
         priority: 3,
         tags: ['hourglass'],
       };
-    case 'step':
+    case 'step': {
+      // The task's live notification: the plan's progress and, when asked, the action running now.
+      const doing = extra.action && s.activity && !s.activity.endedAt ? s.activity.label : undefined;
+      const stepLine = details ? (stepName ? `Now: ${clip(stepName, 120)}` : nextName ? `Next: ${clip(nextName, 120)}` : undefined) : undefined;
       return {
-        event: 'steps',
-        title: `${agent}${where} · ${p.done}/${p.total}`,
-        message: lines(`${phoneBar(p.done, p.total)} ${p.percent}%`, details ? (stepName ? `Now: ${clip(stepName, 120)}` : nextName ? `Next: ${clip(nextName, 120)}` : undefined) : undefined),
+        event: extra.action ? 'actions' : 'steps',
+        title: p.total ? `${agent}${where} · ${p.done}/${p.total}` : `${agent}${where} · working`,
+        message: lines(p.total ? `${phoneBar(p.done, p.total)} ${p.percent}%` : undefined, stepLine, details && doing ? `Doing: ${clip(doing, 120)}` : undefined) || 'Working',
         priority: 2,
         tags: ['arrow_forward'],
       };
+    }
   }
 }
 
@@ -297,6 +329,9 @@ interface Track {
   waitingSince?: number;
   waitPushed?: boolean;
   lastStepPush?: number;
+  /** The last live update (a step or an action), and the action it showed. */
+  lastLivePush?: number;
+  sentAction?: string;
   troubleSince?: number;
   troublePushed?: boolean;
   quietPushedFor?: number;
@@ -325,6 +360,8 @@ export interface PushPlannerOptions {
    * and the next one in progress in two calls, and the update should name the next one.
    */
   progressSettleMs?: number;
+  /** With `actions` on: at most one update about the running action this often. */
+  actionEveryMs?: number;
 }
 
 /**
@@ -348,6 +385,7 @@ export class PushPlanner {
   private readonly troubleMs: number;
   private readonly stepEveryMs: number;
   private readonly progressSettleMs: number;
+  private readonly actionEveryMs: number;
 
   constructor(opts: PushPlannerOptions = {}) {
     this.now = opts.now ?? Date.now;
@@ -359,12 +397,14 @@ export class PushPlanner {
     this.troubleMs = opts.troubleMs ?? 2 * 60_000;
     this.stepEveryMs = opts.stepEveryMs ?? 60_000;
     this.progressSettleMs = opts.progressSettleMs ?? 2_000;
+    this.actionEveryMs = opts.actionEveryMs ?? 30_000;
   }
 
-  observe(snapshot: Snapshot, cfg: Pick<PhoneConfig, 'events' | 'details'>): PhonePush[] {
+  observe(snapshot: Snapshot, cfg: Pick<PhoneConfig, 'events' | 'details' | 'doneAfterSec'>): PhonePush[] {
     const now = this.now();
     const out: PhonePush[] = [];
     const want = (e: PhoneEvent) => cfg.events.includes(e);
+    const minWork = cfg.doneAfterSec !== undefined ? cfg.doneAfterSec * 1000 : this.minWorkMs;
     const seen = new Set<string>();
     for (const s of snapshot.sessions) {
       seen.add(s.key);
@@ -409,7 +449,7 @@ export class PushPlanner {
       if (t.stoppedAt !== undefined && (s.status === 'done' || s.status === 'idle') && now - t.stoppedAt >= this.settleMs) {
         const worked = t.workStart !== undefined ? t.stoppedAt - t.workStart : 0;
         const interrupted = s.statusDetail === 'Interrupted';
-        const worth = (worked >= this.minWorkMs || t.progressSent) && !interrupted && mine && want('done');
+        const worth = (worked >= minWork || t.progressSent) && !interrupted && mine && want('done');
         const unfinished = prog.total > 0 && prog.done < prog.total;
         // A stop in the middle of a plan asks the person something: it waits like a question.
         if (!(worth && unfinished && now - t.stoppedAt < this.needsYouAfterMs)) {
@@ -446,18 +486,33 @@ export class PushPlanner {
         }
       }
 
-      // Progress: the period's notification shows the latest finished step, at most once a minute.
+      // The period's live notification: the latest finished step (at most once a minute) and,
+      // when chosen, the action running now (at most twice a minute). One update carries both.
       if (prog.done < t.sentDone) t.sentDone = prog.done; // a new plan
       if (prog.done !== t.seenDone) {
         t.seenDone = prog.done;
         t.seenDoneAt = now;
       }
-      const stepDue = (t.lastStepPush === undefined || now - t.lastStepPush >= this.stepEveryMs) && now - t.seenDoneAt >= this.progressSettleMs;
-      if (want('steps') && mine && active && prog.total > 0 && prog.done > t.sentDone && prog.done < prog.total && stepDue) {
-        t.lastStepPush = now;
-        t.sentDone = prog.done;
+      const stepNews =
+        want('steps') &&
+        prog.total > 0 &&
+        prog.done > t.sentDone &&
+        prog.done < prog.total &&
+        now - t.seenDoneAt >= this.progressSettleMs &&
+        (t.lastStepPush === undefined || now - t.lastStepPush >= this.stepEveryMs);
+      const a = s.activity;
+      const actionKey = a && !a.endedAt && a.kind !== 'thinking' && a.kind !== 'message' ? `${a.label}|${a.startedAt}` : undefined;
+      const actionNews =
+        want('actions') && actionKey !== undefined && actionKey !== t.sentAction && (t.lastLivePush === undefined || now - t.lastLivePush >= this.actionEveryMs);
+      if (mine && active && (stepNews || actionNews)) {
+        t.lastLivePush = now;
+        if (stepNews) {
+          t.lastStepPush = now;
+          t.sentDone = prog.done;
+        }
+        if (actionKey !== undefined) t.sentAction = actionKey;
         t.progressSent = true;
-        out.push({ ...formatPush('step', s, cfg.details), sequence: t.episode });
+        out.push({ ...formatPush('step', s, cfg.details, { action: want('actions') }), sequence: t.episode });
       }
       t.status = s.status;
     }
@@ -480,6 +535,25 @@ function end(t: Track, done: number): void {
   t.sentDone = done;
 }
 
+/** Silent updates pause while fewer messages than this are left for the day, so alerts still get through. */
+export const QUIET_RESERVE = 50;
+
+/**
+ * How many messages this sender may still publish today, when the server limits them
+ * (ntfy.sh: 250 a day per network address, counted by the server across every sender);
+ * undefined when it does not say.
+ */
+export async function messagesLeft(cfg: PhoneConfig, fetchImpl: typeof fetch = fetch): Promise<number | undefined> {
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (cfg.token) headers.Authorization = `Bearer ${cfg.token}`;
+  const res = await fetchImpl(`${cfg.server}/v1/account`, { headers, signal: AbortSignal.timeout(10_000) });
+  if (!res.ok) return undefined;
+  const a = (await res.json().catch(() => undefined)) as { limits?: { messages?: number }; stats?: { messages_remaining?: number } } | undefined;
+  const limit = a?.limits?.messages;
+  const left = a?.stats?.messages_remaining;
+  return typeof limit === 'number' && limit > 0 && typeof left === 'number' ? left : undefined;
+}
+
 export interface PhoneNotifierOptions {
   home: string;
   /** The newest snapshot (the engine's `snapshot`). */
@@ -492,6 +566,8 @@ export interface PhoneNotifierOptions {
   everyMs?: number;
   planner?: PushPlanner;
   send?: (cfg: PhoneConfig, push: PhonePush) => Promise<SendResult>;
+  /** Messages left for today (default: asks the ntfy server). */
+  budget?: (cfg: PhoneConfig) => Promise<number | undefined>;
 }
 
 /**
@@ -507,6 +583,9 @@ export class PhoneNotifier {
   private timer: ReturnType<typeof setInterval> | undefined;
   private running: Promise<void> | undefined;
   private again = false;
+  private left: number | undefined;
+  private leftAt = -Infinity;
+  private quietPaused = false;
   private readonly planner: PushPlanner;
   private readonly opts: PhoneNotifierOptions;
 
@@ -574,8 +653,28 @@ export class PhoneNotifier {
     if (!pushes.length || !this.opts.canSend()) return;
     const send = this.opts.send ?? sendPush;
     for (const p of pushes) {
+      if (p.priority <= 2 && !(await this.quietAllowed(cfg))) continue;
       const r = await send(cfg, p);
+      if (r.ok && this.left !== undefined) this.left -= 1;
       this.opts.report?.(r.ok ? p.title : `${p.title}: ${r.error}`, r.ok);
     }
+  }
+
+  /** Silent updates are worth a message only while the day's allowance keeps room for alerts. */
+  private async quietAllowed(cfg: PhoneConfig): Promise<boolean> {
+    const now = Date.now();
+    if (now - this.leftAt >= 60_000) {
+      this.leftAt = now;
+      this.left = await (this.opts.budget ?? messagesLeft)(cfg).catch(() => undefined);
+    }
+    const ok = this.left === undefined || this.left > QUIET_RESERVE;
+    if (ok === this.quietPaused) {
+      this.quietPaused = !ok;
+      this.opts.report?.(
+        ok ? 'progress updates resumed' : `progress updates paused: ${this.left} notifications left today on ${new URL(cfg.server).host}, kept for alerts`,
+        ok,
+      );
+    }
+    return ok;
   }
 }

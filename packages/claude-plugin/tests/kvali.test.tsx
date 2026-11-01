@@ -54,7 +54,10 @@ function engine(on: On, files: Record<string, File> = {}) {
     return { value: { kind: 'file' as const, size: f.text.length, mtimeMs: f.mtimeMs, isLink: false } }
   })
   const pushes: { url: string; auth?: string; body: Record<string, unknown> }[] = []
+  // ntfy's GET /v1/account answers how many messages are left today; a POST is a push.
+  const allowance = { limits: { messages: 250 }, stats: { messages_remaining: 200 } }
   on('http.fetch', (_, e) => {
+    if ((e.init?.method ?? 'GET') === 'GET') return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(allowance) } }
     pushes.push({ url: e.url, auth: e.init?.headers?.Authorization, body: JSON.parse(e.init?.body ?? '{}') })
     return { value: { status: 200, ok: true, headers: {}, text: '{}' } }
   })
@@ -62,7 +65,7 @@ function engine(on: On, files: Record<string, File> = {}) {
     writes.push({ path: e.path, text: e.text })
     return { value: undefined }
   })
-  return { writes, toasts, pushes }
+  return { writes, toasts, pushes, allowance }
 }
 
 const usage = { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 1_000, cache_creation_input_tokens: 100, model: 'claude-opus-5-5' }
@@ -329,6 +332,52 @@ test('a turn that stops mid-plan waits a minute for the person before it is push
   await clock.advance(22_000)
   expect(pushes.map(p => [p.body.title, p.body.message, p.body.priority])).toEqual([['Claude Code stopped and is waiting for you · w', 'Stopped at 1/2 tasks', 4]])
   expect(pushes[0]!.body.sequence_id).toMatch(/^kvali-s1-/)
+})
+
+test('phone choices: the action running now, every turn\'s end, and room kept for alerts', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  mock.env(on, { HOME: '/home/u' })
+  const phone = { phone: { v: 2, server: 'https://ntfy.example.com', topic: 'kvali-test', events: ['done', 'actions'], details: true, doneAfter: 0 } }
+  const { pushes, allowance } = engine(on, { '/home/u/.kvali/config.json': { text: JSON.stringify(phone), mtimeMs: T0 } })
+  let finish: () => void = () => undefined
+  on('tool.call', async (_, e) => {
+    if (e.tool === 'Bash') await new Promise<void>(r => (finish = r))
+    return { result: {} }
+  })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+
+  await $.session.start({ cwd: '/w/shop', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  const tests = $.tool.call({ tool: 'Bash', command: 'pnpm test', description: 'Run the tests' })
+  await clock.advance(2_000)
+  expect(pushes.map(p => [p.body.title, p.body.message, p.body.priority])).toEqual([['Claude Code · w · working', 'Doing: Run the tests', 2]])
+  const seq = pushes[0]!.body.sequence_id
+  finish()
+  await tests
+  const build = $.tool.call({ tool: 'Bash', command: 'pnpm build', description: 'Build' })
+  await clock.advance(10_000)
+  expect(pushes).toHaveLength(1) // at most twice a minute
+  await clock.advance(22_000)
+  expect(pushes.map(p => [p.body.message, p.body.sequence_id])).toEqual([['Doing: Run the tests', seq], ['Doing: Build', seq]])
+  finish()
+  await build
+
+  // Another sender used the day up: silent updates wait, the turn's end still goes.
+  allowance.stats.messages_remaining = 30
+  await clock.advance(61_000)
+  const deploy = $.tool.call({ tool: 'Bash', command: 'pnpm deploy', description: 'Deploy' })
+  await clock.advance(4_000)
+  expect(pushes).toHaveLength(2)
+  finish()
+  await deploy
+  await $.turn.complete({ answer: '', durationMs: 20_000, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(1_000)
+  expect(pushes.map(p => [p.body.title, p.body.priority, p.body.sequence_id])).toEqual([
+    ['Claude Code · w · working', 2, seq],
+    ['Claude Code · w · working', 2, seq],
+    ['Claude Code finished · w', 3, seq],
+  ])
 })
 
 test('without a phone setup nothing is sent, and the heartbeat says so', async ($, on) => {

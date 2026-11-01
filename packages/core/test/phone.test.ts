@@ -7,6 +7,8 @@ import { test } from 'node:test';
 import type { AgentSession, Snapshot, TaskItem } from '../src/model.ts';
 import { ClaudeCodeAdapter } from '../src/adapters/claude-code.ts';
 import {
+  formatPush,
+  messagesLeft,
   newTopic,
   ntfyRequest,
   phoneBar,
@@ -58,7 +60,7 @@ test('phone setup: an unguessable topic, saved owner-only next to other settings
   await writePhoneConfig(home, cfg);
   const file = path.join(home, '.kvali', 'config.json');
   if (process.platform !== 'win32') assert.equal(statSync(file).mode & 0o777, 0o600);
-  assert.deepEqual(await readPhoneConfig(home), { ...cfg, server: 'https://ntfy.example.com' });
+  assert.deepEqual(await readPhoneConfig(home), { ...cfg, server: 'https://ntfy.example.com', doneAfterSec: 120 });
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).other, 1, 'other settings are kept');
 
   await writePhoneConfig(home, undefined);
@@ -74,6 +76,11 @@ test('phone setup: an unguessable topic, saved owner-only next to other settings
   await writePhoneConfig(home, { server: 'https://ntfy.sh', topic: 'kvali-t', events: ['needs-you', 'done', 'error', 'stuck'], details: true });
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).phone.v, 2);
   assert.deepEqual((await readPhoneConfig(home))?.events, ['needs-you', 'done', 'error', 'stuck'], 'progress turned off stays off');
+
+  // The person's choices: live actions, and every finished task whatever its length.
+  await writePhoneConfig(home, { server: 'https://ntfy.sh', topic: 'kvali-t', events: ['done', 'steps', 'actions'], details: true, doneAfterSec: 0 });
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).phone.doneAfter, 0);
+  assert.deepEqual(await readPhoneConfig(home), { server: 'https://ntfy.sh', topic: 'kvali-t', token: undefined, events: ['done', 'steps', 'actions'], details: true, doneAfterSec: 0 });
 });
 
 test('phone links and requests', () => {
@@ -119,6 +126,20 @@ test('sendPush publishes JSON to the server and reports failures in words', asyn
   }
   const down = await sendPush({ server: 'http://127.0.0.1:9', topic: 't', events: [], details: true }, testPush());
   assert.match((down as { error: string }).error, /could not reach 127\.0\.0\.1:9/);
+});
+
+test('messagesLeft reads the day\'s allowance from the ntfy server', async () => {
+  const cfg: PhoneConfig = { server: 'https://ntfy.example.com', topic: 't', events: [], details: true, token: 'tk_1' };
+  const asked: { url: string; auth?: string }[] = [];
+  const fake = (body: unknown, status = 200) =>
+    (async (url: string, init?: RequestInit) => {
+      asked.push({ url, auth: (init?.headers as Record<string, string> | undefined)?.Authorization });
+      return new Response(JSON.stringify(body), { status });
+    }) as unknown as typeof fetch;
+  assert.equal(await messagesLeft(cfg, fake({ limits: { messages: 250 }, stats: { messages_remaining: 37 } })), 37);
+  assert.deepEqual(asked[0], { url: 'https://ntfy.example.com/v1/account', auth: 'Bearer tk_1' });
+  assert.equal(await messagesLeft(cfg, fake({ limits: { messages: 0 }, stats: { messages_remaining: 0 } })), undefined, 'no daily limit');
+  assert.equal(await messagesLeft(cfg, fake({}, 500)), undefined);
 });
 
 test('push planner: a question left a minute, a long task finished, an error; nothing for short or interrupted work', () => {
@@ -276,6 +297,87 @@ test('push planner: progress is one notification per task, updated at most once 
   assert.equal(ask[0]!.message, 'Waiting for your answer\n1/2 tasks');
   assert.equal(ask[0]!.sequence, undefined, 'a question is a notification of its own');
   assert.doesNotMatch(JSON.stringify(ask), /storefront|Stripe|secrets|Step/);
+});
+
+test('push planner: the person chooses the events, live actions included, and how long a task must be', () => {
+  let now = 20_000_000;
+  const planner = new PushPlanner({ now: () => now });
+  const cfg = { events: ['done', 'steps', 'actions'] as PhoneEvent[], details: true, doneAfterSec: 0 };
+  const running = (label: string, at: number) => ({ kind: 'command' as const, label, startedAt: at });
+  planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(0, 3) })), cfg);
+  now += 1_000;
+  const first = planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(0, 3), activity: running('Run the tests', now) })), cfg);
+  assert.deepEqual(
+    first.map((p) => [p.title, p.message, p.priority]),
+    [['Claude Code · storefront · 0/3', `${phoneBar(0, 3)} 0%\nNow: Step 1\nDoing: Run the tests`, 2]],
+  );
+  const seq = first[0]!.sequence;
+  now += 10_000;
+  assert.deepEqual(planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(0, 3), activity: running('Build', now) })), cfg), [], 'at most twice a minute');
+  now += 25_000;
+  const next = planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(0, 3), activity: running('Build', now - 25_000) })), cfg);
+  assert.deepEqual(next.map((p) => [p.message.split('\n').at(-1), p.sequence]), [['Doing: Build', seq]], 'the latest action, in the same notification');
+  now += 40_000;
+  assert.deepEqual(planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(0, 3), activity: running('Build', now - 65_000) })), cfg), [], 'nothing new');
+
+  // Every task, however short, once the person asked for that.
+  now += 1_000;
+  planner.observe(snap(session({ key: 'claude-code:q', status: 'working', updatedAt: now })), cfg);
+  now += 9_000;
+  planner.observe(snap(session({ key: 'claude-code:q', status: 'done', updatedAt: now })), cfg);
+  now += 3_000;
+  const quick = planner.observe(snap(session({ key: 'claude-code:q', status: 'done', updatedAt: now - 3_000 })), cfg);
+  assert.deepEqual(quick.map((p) => p.title), ['Claude Code finished · storefront']);
+  assert.match(quick[0]!.message, /Done in 9s/);
+
+  // Without a plan the live notification still says what runs; without details it names nothing.
+  const bare = formatPush('step', session({ activity: running('pnpm build', now) }), false, { action: true });
+  assert.deepEqual([bare.title, bare.message], ['Claude Code · working', 'Working']);
+});
+
+test('PhoneNotifier: progress updates pause when the day\'s ntfy allowance runs low, alerts still go', async () => {
+  const sent: string[] = [];
+  const lines: string[] = [];
+  let left = 120;
+  let now = 30_000_000;
+  const planner = new PushPlanner({ now: () => now });
+  let snapshot = snap(session({ status: 'working', updatedAt: now, tasks: tasks(0, 4) }));
+  const home = tmpHome();
+  writeText(path.join(home, '.kvali', 'config.json'), JSON.stringify({ phone: { v: 2, topic: 'kvali-t', events: ['steps', 'error'] } }));
+  const notifier = new PhoneNotifier({
+    home,
+    snapshot: () => snapshot,
+    canSend: () => true,
+    planner,
+    budget: async () => left,
+    send: async (_cfg, p) => {
+      sent.push(p.title);
+      return { ok: true };
+    },
+    report: (line) => lines.push(line),
+  });
+  await notifier.tick();
+  now += 3_000;
+  snapshot = snap(session({ status: 'working', updatedAt: now, tasks: tasks(1, 4) }));
+  await notifier.tick();
+  now += 3_000;
+  await notifier.tick();
+  assert.deepEqual(sent, ['Claude Code · storefront · 1/4']);
+
+  left = 40; // another sender used the day up; the next check sees it
+  (notifier as unknown as { leftAt: number }).leftAt = -Infinity;
+  now += 61_000;
+  snapshot = snap(session({ status: 'working', updatedAt: now, tasks: tasks(2, 4) }));
+  await notifier.tick();
+  now += 3_000;
+  await notifier.tick();
+  assert.equal(sent.length, 1, 'the update waits');
+  assert.match(lines.at(-1)!, /paused: 40 notifications left today on ntfy\.sh/);
+  now += 1_000;
+  snapshot = snap(session({ status: 'error', statusDetail: 'API Error', updatedAt: now, tasks: tasks(2, 4) }));
+  await notifier.tick();
+  assert.deepEqual(sent.at(-1), 'Claude Code stopped with an error · storefront', 'an alert still goes');
+  notifier.dispose();
 });
 
 test('PhoneNotifier: a finished turn reaches the phone though nothing changes after it', async () => {

@@ -54,11 +54,15 @@ import {
   sessionTokens,
   todayUsage,
   uninstallClaudeHooks,
+  DEFAULT_DONE_AFTER_SEC,
+  PHONE_EVENTS,
   type AgentSession,
+  type PhoneConfig,
+  type PhoneEvent,
   type Snapshot,
 } from '@kvali/core';
 
-const VERSION = '0.6.1';
+const VERSION = '0.6.2';
 
 interface Options {
   json: boolean;
@@ -75,6 +79,10 @@ interface Options {
   private: boolean;
   /** `--steps` / `--no-steps`: progress notifications on or off; unset keeps the setup's choice. */
   steps: boolean | undefined;
+  /** `--events a,b,c`: exactly these notifications. */
+  events: PhoneEvent[] | undefined;
+  /** `--done-after <seconds>`: the shortest task whose end is worth a notification. */
+  doneAfter: number | undefined;
 }
 
 function parse(argv: string[]): { cmd: string[]; opts: Options } {
@@ -89,6 +97,8 @@ function parse(argv: string[]): { cmd: string[]; opts: Options } {
     color: process.stdout.isTTY && !process.env.NO_COLOR,
     private: false,
     steps: undefined,
+    events: undefined,
+    doneAfter: undefined,
   };
   const cmd: string[] = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -146,6 +156,19 @@ function parse(argv: string[]): { cmd: string[]; opts: Options } {
       case '--no-steps':
         opts.steps = false;
         break;
+      case '--events': {
+        const list = next().split(',').map((e) => e.trim()).filter(Boolean);
+        const bad = list.filter((e) => !PHONE_EVENTS.includes(e as PhoneEvent));
+        if (bad.length) fail(`unknown event ${bad.join(', ')}: choose from ${PHONE_EVENTS.join(', ')}`);
+        opts.events = PHONE_EVENTS.filter((e) => list.includes(e));
+        break;
+      }
+      case '--done-after': {
+        const sec = Number(next());
+        if (!Number.isFinite(sec) || sec < 0) fail('--done-after needs a number of seconds (0: every task)');
+        opts.doneAfter = Math.round(sec);
+        break;
+      }
       case '--version':
       case '-v':
         console.log(VERSION);
@@ -189,7 +212,8 @@ Options
   --port <n>                  hook hub port (default ${DEFAULT_HOOK_PORT})
   --no-hub                    do not listen for hook events (and send no phone notifications)
   --no-color
-  kvali phone options: --server <url> (self-hosted ntfy)  --token <token>  --private (no project or step names)  --no-steps (no progress notifications)`;
+  kvali phone options: --server <url> (self-hosted ntfy)  --token <token>  --private (no project or step names)
+                              --events needs-you,done,steps,actions,error,stuck (what to hear about)  --done-after <seconds> (shortest task worth a notification; 0: every task)  --no-steps`;
 
 function fail(msg: string): never {
   console.error(`kvali: ${msg}`);
@@ -393,6 +417,20 @@ function startPhone(engine: Engine, hub: HookHub | undefined, home: string, repo
   return notifier;
 }
 
+/** The chosen notifications, in words. */
+function phoneEventsText(cfg: PhoneConfig): string {
+  const done = cfg.doneAfterSec ?? DEFAULT_DONE_AFTER_SEC;
+  const words: Record<PhoneEvent, string> = {
+    'needs-you': 'a question that waited a minute',
+    done: done ? `tasks done after ${fmtDuration(done * 1000)} or longer` : 'every task done',
+    steps: 'each finished step (silent)',
+    actions: 'every action, live (silent)',
+    error: 'errors',
+    stuck: 'an agent gone silent',
+  };
+  return cfg.events.length ? PHONE_EVENTS.filter((e) => cfg.events.includes(e)).map((e) => words[e]).join(', ') : 'nothing (no event chosen)';
+}
+
 async function phone(sub: string | undefined, opts: Options): Promise<void> {
   const c = paint(opts.color);
   if (sub === 'off') {
@@ -414,8 +452,10 @@ async function phone(sub: string | undefined, opts: Options): Promise<void> {
   if (opts.server) cfg.server = opts.server.replace(/\/+$/, '');
   if (opts.token) cfg.token = opts.token;
   if (opts.private) cfg.details = false;
+  if (opts.events) cfg.events = opts.events;
   if (opts.steps === true && !cfg.events.includes('steps')) cfg.events.push('steps');
   if (opts.steps === false) cfg.events = cfg.events.filter((e) => e !== 'steps');
+  if (opts.doneAfter !== undefined) cfg.doneAfterSec = opts.doneAfter;
   await writePhoneConfig(opts.home, cfg);
   const self = cfg.server !== 'https://ntfy.sh';
   console.log(
@@ -436,10 +476,8 @@ async function phone(sub: string | undefined, opts: Options): Promise<void> {
   console.log(
     [
       '',
-      '  You get an alert when an agent finishes, fails, goes quiet or has waited a minute for your answer.',
-      cfg.events.includes('steps')
-        ? '  Each task also gets one silent notification that its finished steps update (--no-steps turns it off).'
-        : '  Progress notifications are off (kvali phone --steps turns them on).',
+      `  You will hear about: ${phoneEventsText(cfg)}.`,
+      '  Choose with --events needs-you,done,steps,actions,error,stuck and --done-after <seconds>.',
       '  They are sent while Kvali runs: the editor extension, `kvali`, or `kvali watch` in the background.',
       "  Kvali's Claude Code plugin sends them for its own sessions by itself.",
       `  ${c.gray('Test: kvali phone test · Stop: kvali phone off')}`,

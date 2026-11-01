@@ -9,6 +9,8 @@ export interface PhoneView {
   link: string;
   events: string[];
   details: boolean;
+  /** A task's end is pushed when it took at least this many seconds (0: every task). */
+  doneAfterSec: number;
 }
 
 export type Scope = 'all' | 'workspace';
@@ -49,7 +51,7 @@ export type FromWebview =
   | { type: 'copy'; text: string }
   | { type: 'hidePhoneCard' }
   | { type: 'showPhoneCard' }
-  | { type: 'phoneProgress'; on: boolean }
+  | { type: 'phoneEvents'; events: string[]; doneAfterSec: number }
   | {
       type: 'command';
       command:
