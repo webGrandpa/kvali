@@ -1,4 +1,4 @@
-# Kvali — AI Agent Progress
+# Kvali — AI Agent Progress Tracker
 
 **One progress bar for every AI coding agent.** Stop asking your agent "what's the progress?". Kvali shows the plan, the current step, tokens, cost and plan limits of Claude Code, Codex, Gemini CLI, Antigravity and any agent that reads `AGENTS.md`, grouped by project.
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.5 — 2026-11-01
+
+- The extension is listed as "Kvali — AI Agent Progress Tracker", so a search for a progress tracker finds it.
+
 ## 0.6.4 — 2026-11-01
 
 - **`kvali setup` from npm installs the Claude Code plugin again.** Since 0.6.0 the npm package was missing the plugin's manifest (`.claude-plugin/`), so a setup from the terminal fell back to hooks. The release workflow now keeps that folder, and it stops before publishing an npm package without it.

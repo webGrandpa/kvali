@@ -1,8 +1,8 @@
 {
   "name": "kvali",
-  "displayName": "Kvali — AI Agent Progress",
+  "displayName": "Kvali — AI Agent Progress Tracker",
   "description": "One progress bar for all your AI coding agents: plan progress, the current step, usage and alerts on your phone, grouped by project. Local and read-only.",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "publisher": "webgrandpa",
   "author": {
     "name": "Giorgi Khiladze",
@@ -32,10 +32,13 @@
   ],
   "keywords": [
     "ai",
+    "ai agent",
     "agents",
     "coding agent",
     "progress",
     "progress bar",
+    "progress tracker",
+    "tracker",
     "tasks",
     "plan",
     "productivity",
