@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'packages', 'claude-plugin');
-const FILES = ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/register.tsx', 'hooks/model.ts', 'types/index.d.ts', 'README.md'];
+const FILES = ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/register.tsx', 'hooks/model.ts', 'types/index.d.ts', 'README.md', 'LICENSE'];
 
 export async function copyClaudePlugin(out) {
   await rm(out, { recursive: true, force: true });

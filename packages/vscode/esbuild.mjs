@@ -1,6 +1,7 @@
 import { copyFile, mkdir, rm } from 'node:fs/promises';
 import * as esbuild from 'esbuild';
 import { copyClaudePlugin } from '../../scripts/copy-claude-plugin.mjs';
+import { checkNotices } from '../../scripts/third-party.mjs';
 
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
@@ -45,9 +46,12 @@ const builds = [
 ];
 
 if (production) {
+  // Bundled open-source code must be credited: stop when THIRD_PARTY_NOTICES.md misses a package.
+  await checkNotices();
   await rm('dist', { recursive: true, force: true });
   // The Marketplace page shows the repository's changelog.
   await copyFile('../../CHANGELOG.md', 'CHANGELOG.md');
+  await copyFile('../../THIRD_PARTY_NOTICES.md', 'THIRD_PARTY_NOTICES.md');
 }
 await mkdir('dist/webview', { recursive: true });
 await copyFile('webview/styles.css', 'dist/webview/main.css');

@@ -379,6 +379,7 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
       agentLabel: this.label,
       id: st.id,
       title: st.title ?? 'Untitled session',
+      titleFromPrompt: st.title !== undefined ? true : undefined,
       projectPath: st.cwd ? (findGitRoot(st.cwd) ?? st.cwd) : undefined,
       cwd: st.cwd,
       model: st.model,

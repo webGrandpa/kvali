@@ -85,6 +85,11 @@ export interface AgentSession {
   agentLabel: string;
   id: string;
   title: string;
+  /**
+   * The title is the first line of the person's first message, because the agent gave the
+   * session no title of its own. Shown on this computer only: it never goes to the phone.
+   */
+  titleFromPrompt?: boolean;
   /** Absolute path of the project (git root of the agent's working directory) the session belongs to. */
   projectPath?: string;
   /** The directory the agent was started in, when it differs from `projectPath` (used to resume sessions). */

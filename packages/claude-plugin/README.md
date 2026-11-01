@@ -35,3 +35,9 @@ claude plugin test packages/claude-plugin
 ```
 
 `hooks/model.ts` holds the logic (plan, step timing, the "is it working?" line), `hooks/register.tsx` connects it to Claude Code's events and draws the pane, `types/index.d.ts` declares the state it keeps.
+
+## Privacy
+
+The plugin keeps its state on your computer and has no telemetry. It sends something only when you set up phone notifications: short status lines to the ntfy server you chose, never code or prompts. [Privacy](https://github.com/webGrandpa/kvali/blob/main/PRIVACY.md) · [Security policy](https://github.com/webGrandpa/kvali/blob/main/SECURITY.md) · MIT License
+
+Kvali is an independent open-source project, not affiliated with or endorsed by Anthropic. Claude and Claude Code are trademarks of Anthropic, used only to say what this plugin works with.

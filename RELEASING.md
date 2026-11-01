@@ -19,7 +19,8 @@ Each target is a separate job in [`.github/workflows/release.yml`](.github/workf
 3. **Open VSX**: an Eclipse account (https://accounts.eclipse.org/user/register) whose **GitHub Username** field is `webGrandpa`, the same GitHub account you sign in to Open VSX with. Sign in at https://open-vsx.org with GitHub, then avatar → Settings → **Log in with Eclipse** → **Show Publisher Agreement** → Agree. Settings → **Access Tokens** → new token, saved as the repository secret `OVSX_PAT` (Settings → Secrets and variables → Actions). The first release creates the `webgrandpa` namespace.
 
    Later, optional: claim the namespace with an issue at https://github.com/EclipseFdn/open-vsx.org/issues/new/choose, so Open VSX shows the extension as verified. An owned namespace with a published extension can also use trusted publishing (Settings → Trusted Publishers, then `ovsx publish --trusted-publishing` with `id-token: write`) and drop the token.
-4. **npm**: the CLI is `@kvali/cli` (npm refuses the plain name `kvali` as too close to an existing package). An account at https://www.npmjs.com with two-factor authentication, and the free organization `kvali` (avatar → **Add Organization** → `kvali` → unlimited public packages, free), so the `@kvali` scope belongs to the project. npm sets a trusted publisher only on a package that exists, and a trusted publisher that has not published within 48 hours of being added expires. So reserve the name with an empty placeholder, add the trusted publisher, and push the first release tag within 48 hours: the workflow then publishes the real version, with provenance.
+4. **Security reports**: Settings → **Advanced Security** → **Private vulnerability reporting** → Enable, so the link in [SECURITY.md](SECURITY.md) works.
+5. **npm**: the CLI is `@kvali/cli` (npm refuses the plain name `kvali` as too close to an existing package). An account at https://www.npmjs.com with two-factor authentication, and the free organization `kvali` (avatar → **Add Organization** → `kvali` → unlimited public packages, free), so the `@kvali` scope belongs to the project. npm sets a trusted publisher only on a package that exists, and a trusted publisher that has not published within 48 hours of being added expires. So reserve the name with an empty placeholder, add the trusted publisher, and push the first release tag within 48 hours: the workflow then publishes the real version, with provenance.
 
    ```bash
    mkdir -p /tmp/kvali && cd /tmp/kvali
@@ -40,3 +41,5 @@ git tag v0.6.1 && git push origin v0.6.1
 ```
 
 Watch it under Actions → Release. Running the workflow by hand (Run workflow) builds and tests without publishing.
+
+The extension's release build stops when a bundled library or its version is missing from [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md): add its license there (`node scripts/third-party.mjs` shows what the bundles contain). The notices ship inside the `.vsix` and the npm package.

@@ -10,3 +10,5 @@ coverage/
 # Written by Claude Code when it loads the plugin from this folder
 packages/claude-plugin/.claude-plugin/types/
 packages/cli/npm-package/
+# Copied from the repository root by the extension's release build
+packages/vscode/THIRD_PARTY_NOTICES.md

@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { ProgressFileAdapter } from '../src/adapters/progress-file.ts';
-import { fmtTokens, fmtUsd, groupByProject, pathWithin } from '../src/format.ts';
+import { fmtTokens, fmtUsd, groupByProject, pathWithin, redactPaths } from '../src/format.ts';
 import { claudeHookCommand, claudeHooksStatus, installClaudeHooks, uninstallClaudeHooks } from '../src/hooks/claude-install.ts';
 import { HookHub, normalizeHookPayload } from '../src/hooks/hub.ts';
 import { CLAUDE_PLAN_CONTEXT, claudeHookReply } from '../src/hooks/replies.ts';
@@ -252,6 +253,38 @@ test('Hook hub stores sanitized live state and rejects unsafe input', async () =
   assert.equal((await post({ session_id: 'x' }, 'text/plain')).status, 404);
   assert.equal(normalizeHookPayload('claude-code', { session_id: '../../etc/passwd' }), undefined);
   hub.dispose();
+});
+
+test('Hook hub refuses requests addressed to a host name other than this computer', async () => {
+  const port = 40_000 + Math.floor(Math.random() * 20_000);
+  const hub = new HookHub({ port, liveDir: path.join(tmpHome(), 'live') });
+  hub.start();
+  for (let i = 0; i < 50 && !hub.isHub; i += 1) await new Promise((r) => setTimeout(r, 20));
+  const status = (host: string) =>
+    new Promise<number>((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: '/v1/health', headers: { Host: host } }, (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  assert.equal(await status(`127.0.0.1:${port}`), 200);
+  assert.equal(await status(`localhost:${port}`), 200);
+  // a web page that pointed its own name at 127.0.0.1 (DNS rebinding)
+  assert.equal(await status(`attacker.example:${port}`), 403);
+  assert.equal(await status(`127.0.0.1:${port + 1}`), 403);
+  hub.dispose();
+});
+
+test('redactPaths keeps file paths out of bug reports', () => {
+  assert.equal(
+    redactPaths("EACCES: permission denied, open '/Users/ana/.claude/projects/-Users-ana-shop/a1.jsonl'"),
+    "EACCES: permission denied, open '<path>'",
+  );
+  assert.equal(redactPaths('cannot read C:\\Users\\ana\\.codex\\sessions\\x.jsonl: busy'), 'cannot read <path>: busy');
+  assert.equal(redactPaths('watching ~/.kvali/live failed'), 'watching <path> failed');
+  assert.equal(redactPaths('Unexpected token } in JSON at position 5'), 'Unexpected token } in JSON at position 5');
 });
 
 test('Engine isolates a failing adapter', async () => {

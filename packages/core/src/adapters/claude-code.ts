@@ -703,7 +703,8 @@ export class ClaudeCodeAdapter implements Adapter {
 
     const activeSubagents = [...st.subagents.values()].filter((s) => now - s.updatedAt < 60_000).length;
     const window = /\[1m\]/i.test(st.model ?? '') || st.maxContext > 200_000 ? 1_000_000 : 200_000;
-    const title = st.customTitle || st.aiTitle || st.summary || st.firstPrompt || 'Untitled session';
+    const ownTitle = st.customTitle || st.aiTitle || st.summary;
+    const title = ownTitle || st.firstPrompt || 'Untitled session';
 
     let activity = status === 'working' ? st.activity : undefined;
     if (status === 'working' && st.phase === 'tool' && st.open.size > 0) activity = [...st.open.values()].pop();
@@ -714,6 +715,7 @@ export class ClaudeCodeAdapter implements Adapter {
       agentLabel: this.label,
       id: st.sessionId,
       title: truncate(title, 100),
+      titleFromPrompt: !ownTitle && !!st.firstPrompt ? true : undefined,
       projectPath: st.launchCwd ? (findGitRoot(st.launchCwd) ?? st.launchCwd) : undefined,
       cwd: st.launchCwd,
       model: st.model,

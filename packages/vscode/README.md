@@ -14,7 +14,7 @@
 - **Plan limits**: 5-hour and weekly usage for Codex subscriptions.
 - **All projects in one place**, this workspace first. **Resume** a finished Claude Code or Codex session in a terminal with one click.
 
-Everything is local and read-only. Kvali sends nothing anywhere unless you turn on phone notifications, and then only short status lines (agent, project, step, progress), never code or prompts.
+Everything is local and read-only, with no telemetry. Kvali sends nothing anywhere unless you turn on phone notifications, and then only short status lines (agent, project, step, progress), never code or prompts. See the [privacy notes](https://github.com/webGrandpa/kvali/blob/main/PRIVACY.md).
 
 ## Supported agents
 
@@ -32,3 +32,7 @@ Everything is local and read-only. Kvali sends nothing anywhere unless you turn 
 2. Click **Turn on** once. Kvali enables "needs you" alerts and automatic plans for every agent it finds (Kvali's Claude Code plugin, installed with Claude Code's own command, and a short planning rule for Codex and Gemini/Antigravity). All of it is marked, reversible with **Kvali: Turn Off**, and removed automatically when you uninstall Kvali.
 
 Full documentation, the terminal dashboard and the source are on [GitHub](https://github.com/webGrandpa/kvali).
+
+[Privacy](https://github.com/webGrandpa/kvali/blob/main/PRIVACY.md) · [Security policy](https://github.com/webGrandpa/kvali/blob/main/SECURITY.md) · [Third-party notices](https://github.com/webGrandpa/kvali/blob/main/THIRD_PARTY_NOTICES.md) · MIT License
+
+Kvali is an independent open-source project, not affiliated with or endorsed by Anthropic, OpenAI, Google, Microsoft or the makers of the other tools it works with. Claude Code, Codex, Gemini CLI, Antigravity, VS Code, Cursor, Windsurf and the other product names here are trademarks of their owners, used only to say what Kvali works with.

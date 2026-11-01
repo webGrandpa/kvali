@@ -310,6 +310,7 @@ export class GeminiCliAdapter implements Adapter {
       agentLabel: this.label,
       id: st.sessionId ?? path.basename(st.file),
       title: st.summary ? truncate(st.summary, 100) : (title ?? 'Untitled session'),
+      titleFromPrompt: !st.summary && title !== undefined ? true : undefined,
       projectPath: st.projectPath,
       model,
       status: phase === 'idle' && tasksProg.total > 0 && tasksProg.done === tasksProg.total ? 'done' : phase,

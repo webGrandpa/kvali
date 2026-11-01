@@ -52,6 +52,7 @@ test('Antigravity: task.md progress, toolAction activity, project detection and 
   let s = await only(engine);
   assert.equal(s.agent, 'antigravity');
   assert.equal(s.title, 'Code Audit');
+  assert.equal(s.titleFromPrompt, undefined, 'the task list title');
   assert.equal(s.projectPath, '/work/shop');
   assert.equal(s.status, 'working');
   assert.equal(s.activity?.label, 'Running pnpm check-types');
@@ -120,6 +121,7 @@ test('Antigravity: tagged user input gives the title, model and project (no git 
   clock.advance(10_000);
   const s = await only(engineFor(new AntigravityAdapter(), home, clock));
   assert.equal(s.title, 'Add a dark mode toggle to the settings screen');
+  assert.equal(s.titleFromPrompt, true);
   assert.equal(s.model, 'Gemini 3.1 Pro (High)');
   assert.equal(s.projectPath, '/data/apps/fitness/src', 'common ancestor of the folders the agent used');
   assert.equal(s.activity?.label, 'Reading home');

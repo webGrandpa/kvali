@@ -335,6 +335,19 @@ test('push planner: the person chooses the events, live actions included, and ho
   assert.deepEqual([bare.title, bare.message], ['Claude Code · working', 'Working']);
 });
 
+test('a title taken from the person\'s own message never reaches the phone', () => {
+  const plan = tasks(1, 3);
+  const own = formatPush('needs-you', session({ status: 'waiting', statusDetail: 'Needs approval: Bash', tasks: plan }), true);
+  assert.match(own.message, /Checkout page with Stripe/, "the agent's own title is sent");
+  for (const kind of ['needs-you', 'error', 'finished', 'paused', 'gone', 'trouble', 'quiet'] as const) {
+    const s = session({ title: 'deploy with key sk-live-123', titleFromPrompt: true, status: 'waiting', tasks: plan, trouble: { message: 'overloaded', at: 0 } });
+    const push = formatPush(kind, s, true, { workedMs: 60_000, quietMs: 600_000 });
+    assert.ok(!`${push.title}\n${push.message}`.includes('sk-live'), kind);
+  }
+  const s = session({ title: 'deploy with key sk-live-123', titleFromPrompt: true, status: 'waiting', statusDetail: 'Needs approval: Bash', tasks: plan });
+  assert.deepEqual(formatPush('needs-you', s, true).message.split('\n'), ['Needs approval: Bash', '1/3 tasks · Step 2'], 'still says what it needs');
+});
+
 test('PhoneNotifier: progress updates pause when the day\'s ntfy allowance runs low, alerts still go', async () => {
   const sent: string[] = [];
   const lines: string[] = [];
@@ -438,7 +451,9 @@ test('PhoneNotifier: a finished turn reaches the phone though nothing changes af
   assert.equal(published, 2, 'nothing changed, so the engine publishes nothing');
   await notifier.tick(); // what its clock does every few seconds
   assert.deepEqual(sent.map((p) => p.title), ['Claude Code finished · shop']);
-  assert.match(sent[0]!.message, /\nDone in 2m 31s · /);
+  // The session's title is the person's own prompt, which stays on the computer.
+  assert.match(sent[0]!.message, /^Done in 2m 31s · /);
+  assert.ok(!sent[0]!.message.includes('Refactor the checkout page'));
   notifier.dispose();
 });
 

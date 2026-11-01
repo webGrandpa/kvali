@@ -26,6 +26,8 @@ await mkdir(OUT, { recursive: true });
 await cp(path.join(CLI, 'dist'), path.join(OUT, 'dist'), { recursive: true });
 await cp(path.join(CLI, 'README.md'), path.join(OUT, 'README.md'));
 await cp(path.join(CLI, 'LICENSE'), path.join(OUT, 'LICENSE'));
+// The CLI bundles open-source code whose licenses ask to be shipped along.
+await cp(path.join(ROOT, 'THIRD_PARTY_NOTICES.md'), path.join(OUT, 'THIRD_PARTY_NOTICES.md'));
 
 const manifest = {
   name: src.name,
@@ -37,7 +39,7 @@ const manifest = {
   repository: { type: 'git', url: 'git+https://github.com/webGrandpa/kvali.git', directory: 'packages/cli' },
   bugs: { url: 'https://github.com/webGrandpa/kvali/issues' },
   bin: { kvali: 'dist/kvali.mjs' },
-  files: ['dist'],
+  files: ['dist', 'THIRD_PARTY_NOTICES.md'],
   engines: { node: '>=20' },
   keywords: src.keywords,
   publishConfig: { access: 'public' },

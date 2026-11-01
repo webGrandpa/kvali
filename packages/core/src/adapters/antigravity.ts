@@ -377,6 +377,7 @@ export class AntigravityAdapter implements Adapter {
       agentLabel: this.label,
       id: st.id,
       title: st.task?.title || st.firstInput || current?.title || 'Antigravity conversation',
+      titleFromPrompt: !st.task?.title && !!st.firstInput ? true : undefined,
       projectPath: this.projectOf(st, ctx.home),
       model: st.model,
       turn: st.turnStartedAt !== undefined ? { steps: st.turnSteps, startedAt: st.turnStartedAt } : undefined,

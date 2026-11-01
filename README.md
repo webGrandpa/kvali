@@ -24,7 +24,7 @@ Long agent runs are a black box. You either babysit the chat or keep asking for 
 - **Plan limits**: 5-hour and weekly usage for Codex subscriptions, straight from Codex's own logs.
 - **Every project at once**: sessions are grouped by project; the current workspace comes first.
 
-Everything is local and read-only. Kvali sends nothing anywhere unless you turn on phone notifications, and then only short status lines (agent, project, step, progress), never code or prompts.
+Everything is local and read-only, with no telemetry. Kvali sends nothing anywhere unless you turn on phone notifications, and then only short status lines (agent, project, step, progress), never code or prompts. See [PRIVACY.md](PRIVACY.md).
 
 ## Supported agents
 
@@ -64,7 +64,7 @@ Follow your agents from your phone, for every agent Kvali sees:
 3. A test notification arrives. That's it.
 
 - **Who sends**: the editor window that holds the hook port (one per machine, so each event arrives once), `kvali` or `kvali watch` (no dashboard, for terminal-only setups). Kvali's Claude Code plugin sends for its own sessions by itself, with exact "needs you" and "no data from the API" alerts.
-- **What a push says**: the agent, the project, the step and progress, for example "Claude Code needs you · storefront / Needs approval: Bash / 3/7 tasks · Writing tests". Never code or prompts. `kvali phone --private` leaves out project and step names too.
+- **What a push says**: the agent, the project, the step and progress, for example "Claude Code needs you · storefront / Needs approval: Bash / 3/7 tasks · Writing tests". Never code or prompts: a session title that is only your first message stays on the computer. `kvali phone --private` leaves out project and step names too. [PRIVACY.md](PRIVACY.md) has the details, ntfy.sh's own policy included.
 - **Privacy**: on ntfy.sh anyone who knows a topic's name can read it, so Kvali generates an unguessable one (80 random bits). Keep it to yourself, or use your own ntfy server: `kvali phone --server https://ntfy.example.com --token tk_…`.
 - **Your choice**: the phone card has a checkbox for each kind of notification: a question that waited a minute, a task done (of any length, or only from 30 s, 2 min or 5 min), each finished step, every action live (at most twice a minute), an error, an agent gone silent. In a terminal: `kvali phone --events needs-you,done,steps,actions,error,stuck --done-after 30`. The setup is `~/.kvali/config.json` (`phone.events`, `phone.doneAfter` in seconds). **Kvali: Stop Phone Notifications** or `kvali phone off` turns it all off.
 - **ntfy.sh's daily limit**: 250 notifications a day per network address. When fewer than 50 are left, Kvali pauses the silent updates (steps, actions) and keeps the rest for alerts. Your own ntfy server has the limits you give it.
@@ -180,4 +180,8 @@ Press <kbd>F5</kbd> in VS Code to launch an Extension Development Host. See [CON
 
 ## License
 
-[MIT](LICENSE) © 2026 Giorgi Khiladze
+[MIT](LICENSE) © 2026 Giorgi Khiladze. Kvali bundles [Preact](https://preactjs.com) and [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator), both MIT-licensed: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+[Privacy](PRIVACY.md) · [Security policy](SECURITY.md)
+
+Kvali is an independent open-source project, not affiliated with or endorsed by Anthropic, OpenAI, Google, Microsoft or the makers of the other tools it works with. Claude Code, Codex, Gemini CLI, Antigravity, VS Code, Cursor, Windsurf and the other product names here are trademarks of their owners, used only to say what Kvali works with.

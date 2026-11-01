@@ -14,7 +14,7 @@ pnpm build
 
 | Package | What it is |
 | --- | --- |
-| `packages/core` | Engine, adapters, pricing, hook hub. Pure Node, no runtime dependencies. Tests run on `node:test` with built-in TypeScript type stripping. |
+| `packages/core` | Engine, adapters, pricing, hook hub. Pure Node with one small runtime dependency (qrcode-generator, MIT). Tests run on `node:test` with built-in TypeScript type stripping. |
 | `packages/vscode` | The editor extension (esbuild bundle) and its Preact webview. |
 | `packages/cli` | The `kvali` terminal dashboard. |
 
@@ -41,6 +41,12 @@ To try it live, run `claude --plugin-dir packages/claude-plugin`: saving a file 
 - Add or update tests; `pnpm test` and `pnpm typecheck` must pass.
 - Never commit real transcripts. Build fixtures in test code and strip anything private.
 - Describe which agent version you verified against.
+
+## Licensing
+
+- By contributing, you agree that your contribution is released under the project's [MIT License](LICENSE). Only submit code you wrote or may license that way.
+- A new dependency that ends up in a bundle needs a permissive license (MIT, ISC, BSD or Apache-2.0) and its own section in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). `node scripts/third-party.mjs` checks this, and the release build runs it.
+- Security problems go through [SECURITY.md](SECURITY.md), not public issues.
 
 ## Reporting a format change
 

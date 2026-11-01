@@ -61,6 +61,7 @@ test('Claude Code: tasks, activity, de-duplicated tokens, cost and status transi
   const engine = engineFor(new ClaudeCodeAdapter(), home, clock);
   let s = await only(engine);
   assert.equal(s.title, 'Checkout page');
+  assert.equal(s.titleFromPrompt, undefined, "Claude's own title");
   assert.equal(s.status, 'working');
   assert.equal(s.projectPath, CWD);
   assert.equal(s.activity?.label, 'Run the test suite');
@@ -134,6 +135,7 @@ test('Claude Code: the tasks directory is authoritative and TodoWrite is a fallb
   const engine = engineFor(new ClaudeCodeAdapter(), home, clock);
   let s = await only(engine);
   assert.equal(s.title, 'Refactor the API client');
+  assert.equal(s.titleFromPrompt, true, 'the first prompt, kept off the phone');
   assert.deepEqual(progressOf(s.tasks), { done: 1, inProgress: 1, total: 3, percent: 33 });
   assert.equal(s.tasks[1].activeTitle, 'Extracting fetch wrapper');
 

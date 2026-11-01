@@ -47,6 +47,7 @@ test('Gemini CLI: JSONL sessions with patches, todos and tokens', async () => {
   assert.equal(s.agent, 'gemini-cli');
   assert.equal(s.projectPath, '/work/web-app');
   assert.equal(s.title, 'Migrate the router to the new API');
+  assert.equal(s.titleFromPrompt, true);
   assert.equal(s.status, 'working');
   assert.equal(s.activity?.label, 'Shell');
   assert.deepEqual(progressOf(s.tasks), { done: 1, inProgress: 1, total: 3, percent: 33 });
@@ -69,6 +70,7 @@ test('Gemini CLI: JSONL sessions with patches, todos and tokens', async () => {
   clock.advance(2_000);
   s = await only(engine);
   assert.equal(s.title, 'Router migration');
+  assert.equal(s.titleFromPrompt, undefined, "Gemini's summary");
   assert.equal(s.status, 'idle');
   assert.equal(s.tokens?.cacheRead, 35_000);
 

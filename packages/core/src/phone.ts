@@ -225,7 +225,10 @@ function clip(text: string, max: number): string {
 
 type Kind = 'needs-you' | 'error' | 'finished' | 'paused' | 'gone' | 'trouble' | 'quiet' | 'step';
 
-/** The words of a push. Without details, no project, task or step names leave the computer. */
+/**
+ * The words of a push. Without details, no project, task or step names leave the computer;
+ * a session title taken from the person's own first message never does.
+ */
 export function formatPush(kind: Kind, s: AgentSession, details: boolean, extra: { workedMs?: number; quietMs?: number; action?: boolean } = {}): PhonePush {
   const agent = s.agentLabel;
   const where = details ? ` · ${projectName(s.projectPath)}` : '';
@@ -234,7 +237,7 @@ export function formatPush(kind: Kind, s: AgentSession, details: boolean, extra:
   const stepName = step ? (step.activeTitle ?? step.title) : undefined;
   const nextName = step ? undefined : s.tasks.find((t) => t.status === 'pending')?.title;
   const planLine = p.total ? `${p.done}/${p.total} tasks${details && stepName ? ` · ${clip(stepName, 80)}` : ''}` : undefined;
-  const title = details ? clip(s.title, 120) : undefined;
+  const title = details && !s.titleFromPrompt ? clip(s.title, 120) : undefined;
   const lines = (...xs: (string | undefined)[]) => xs.filter(Boolean).join('\n');
   switch (kind) {
     case 'needs-you':

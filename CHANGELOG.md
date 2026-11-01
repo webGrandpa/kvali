@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.3 — 2026-11-01
+
+- **Your prompts stay on your computer.** When an agent gives a session no title of its own, Kvali titles it with your first message; phone notifications now leave such a title out.
+- **Licenses and policies**: the extension and the npm package include `THIRD_PARTY_NOTICES.md`, the licenses of the two libraries they bundle (Preact and qrcode-generator), and the release build stops when a bundled library is missing from it. New `PRIVACY.md` (what Kvali reads, writes and sends) and `SECURITY.md` (how to report a vulnerability privately). The Claude Code plugin ships its MIT license.
+- **Kvali: Report a Problem** removes file paths from the error messages it quotes.
+- The hook endpoint on 127.0.0.1 refuses requests addressed to any other host name, so a web page cannot reach it through DNS rebinding.
+
 ## 0.6.2 — 2026-11-01
 
 - **Choose what reaches your phone.** The phone card has a checkbox for each kind of notification: a question that waited a minute, a task done, each finished step, every action, an error, an agent gone silent, and how long a task must be to be worth one (any length, 30 s, 2 min or 5 min). In a terminal: `kvali phone --events needs-you,done,steps,actions,error,stuck --done-after 30`. The Claude Code plugin follows the same choices.

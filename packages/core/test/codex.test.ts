@@ -63,6 +63,7 @@ test('Codex: plan, tokens, rate limits and turn status from a rollout file', asy
   let s = await only(engine);
   assert.equal(s.agent, 'codex');
   assert.equal(s.title, 'Add rate limiting to the public API');
+  assert.equal(s.titleFromPrompt, true);
   assert.equal(s.model, 'gpt-5.5-codex');
   assert.equal(s.status, 'working');
   assert.equal(s.activity?.label, 'Shell');

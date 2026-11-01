@@ -33,4 +33,8 @@ kvali watch            # hooks and phone notifications only, e.g. in the backgro
 
 Kvali also comes as an editor extension (VS Code, Antigravity, Cursor, Windsurf): search for "Kvali" in the Extensions view. Source and docs: https://github.com/webGrandpa/kvali
 
+Everything stays on your computer, with no telemetry; only phone notifications, when you set them up, go to the ntfy server you choose. [Privacy](https://github.com/webGrandpa/kvali/blob/main/PRIVACY.md) · [Security policy](https://github.com/webGrandpa/kvali/blob/main/SECURITY.md) · [Third-party notices](https://github.com/webGrandpa/kvali/blob/main/THIRD_PARTY_NOTICES.md)
+
 MIT © Giorgi Khiladze
+
+Kvali is an independent open-source project, not affiliated with or endorsed by Anthropic, OpenAI, Google, Microsoft or the makers of the other tools it works with. Claude Code, Codex, Gemini CLI, Antigravity, VS Code, Cursor, Windsurf and the other product names here are trademarks of their owners, used only to say what Kvali works with.

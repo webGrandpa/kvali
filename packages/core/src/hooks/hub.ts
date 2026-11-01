@@ -10,6 +10,7 @@
  */
 import { promises as fsp } from 'node:fs';
 import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 
 export const DEFAULT_HOOK_PORT = 47821;
@@ -111,7 +112,23 @@ export class HookHub {
     });
   }
 
+  /**
+   * A web page can make a browser call this port by pointing its own host name at
+   * 127.0.0.1 (DNS rebinding); such requests name that host, so only local names pass.
+   * Hooks call `http://127.0.0.1:<port>`.
+   */
+  private localHost(req: http.IncomingMessage): boolean {
+    const host = req.headers.host?.toLowerCase();
+    if (!host) return true;
+    const port = (this.server?.address() as AddressInfo | null)?.port ?? this.port;
+    return host === `127.0.0.1:${port}` || host === `localhost:${port}` || host === `[::1]:${port}`;
+  }
+
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    if (!this.localHost(req)) {
+      res.writeHead(403).end();
+      return;
+    }
     const url = req.url ?? '/';
     if (req.method === 'GET' && url === '/v1/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });

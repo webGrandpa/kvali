@@ -73,6 +73,15 @@ export function projectName(p: string | undefined): string {
   return parts[parts.length - 1] ?? p;
 }
 
+/**
+ * Replaces file paths in a message (an error's text, say) with `<path>`, so a bug report
+ * names no user, folder or project. Paths of two or more parts: `/Users/ana/.codex/x.jsonl`,
+ * `C:\Users\ana\x`, `~/.kvali/live`.
+ */
+export function redactPaths(text: string): string {
+  return text.replace(/(?:[A-Za-z]:|~)?(?:[\\/][^\s\\/'"`<>|:]+){2,}[\\/]?/g, '<path>');
+}
+
 export interface ProjectGroup {
   /** Workspace root or session cwd; `undefined` for sessions without a known project. */
   path: string | undefined;
