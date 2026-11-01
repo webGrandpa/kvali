@@ -50,6 +50,9 @@ jobs:
         with:
           name: release
           if-no-files-found: error
+          # The CLI carries the Claude Code plugin, whose manifest is in a dot folder
+          # (dist/claude-plugin/.claude-plugin); artifacts leave dot folders out unless told.
+          include-hidden-files: true
           path: |
             packages/vscode/kvali-${{ steps.version.outputs.version }}.vsix
             packages/cli/npm-package/
@@ -164,4 +167,13 @@ jobs:
             echo "::notice::$NAME@$V is already on npm."
             exit 0
           fi
+          # What npm would publish must hold the command, the notices and the Claude Code plugin
+          # with its manifest (without it `kvali setup` cannot install the plugin).
+          PACKED=$(npm pack ./out/cli/npm-package --dry-run --json | node -e 'let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => console.log(JSON.parse(s)[0].files.map((f) => f.path).join("\n")))')
+          for f in dist/kvali.mjs THIRD_PARTY_NOTICES.md dist/claude-plugin/.claude-plugin/plugin.json dist/claude-plugin/.claude-plugin/marketplace.json dist/claude-plugin/hooks/hooks.json; do
+            if ! printf '%s\n' "$PACKED" | grep -qxF "$f"; then
+              echo "::error::$f is missing from the npm package"
+              exit 1
+            fi
+          done
           npm publish ./out/cli/npm-package --access public --provenance

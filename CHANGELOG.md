@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.4 — 2026-11-01
+
+- **`kvali setup` from npm installs the Claude Code plugin again.** Since 0.6.0 the npm package was missing the plugin's manifest (`.claude-plugin/`), so a setup from the terminal fell back to hooks. The release workflow now keeps that folder, and it stops before publishing an npm package without it.
+- The Marketplace and Open VSX pages open with a short demo of Kvali at work.
+
 ## 0.6.3 — 2026-11-01
 
 - **Your prompts stay on your computer.** When an agent gives a session no title of its own, Kvali titles it with your first message; phone notifications now leave such a title out.

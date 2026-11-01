@@ -2,7 +2,7 @@
 
 **One progress bar for every AI coding agent.** Stop asking your agent "what's the progress?". Kvali shows the plan, the current step, tokens, cost and plan limits of Claude Code, Codex, Gemini CLI, Antigravity and any agent that reads `AGENTS.md`, grouped by project.
 
-<img src="https://raw.githubusercontent.com/webGrandpa/kvali/main/docs/images/agents-dark.png" width="340" alt="Kvali's Agents view" />
+<img src="https://raw.githubusercontent.com/webGrandpa/kvali/main/docs/images/kvali-demo.gif" alt="Kvali's Agents view: an agent's live status (running, thinking, writing), the plan's progress step by step, and how long this step takes compared with the others" />
 
 ## Features
 
