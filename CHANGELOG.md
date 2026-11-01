@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.6 — 2026-11-01
+
+- **No false "Needs you" in auto mode.** In Claude Code's auto mode a classifier approves or blocks most actions by itself, and Kvali's plugin took each of those checks for a question to you. Now a call shows "Needs you" only when Claude Code puts it to you: an ask rule or a hook's ask, and the prompts auto mode falls back to (after its classifier blocks three in a row, say).
+- **Calmer editor notifications**: a "needs you" notification waits 5 seconds, so a question answered or settled in that time sends nothing, and comes at most once a minute per session. The status bar shows every question as before.
+
 ## 0.6.5 — 2026-11-01
 
 - The extension is listed as "Kvali — AI Agent Progress Tracker", so a search for a progress tracker finds it.

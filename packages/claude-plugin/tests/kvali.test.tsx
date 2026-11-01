@@ -1,6 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
+import { asksPerson } from '../hooks/model'
+
 const T0 = Date.UTC(2026, 9, 31, 10, 0, 0)
 const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
 
@@ -431,4 +433,60 @@ test('automatic planning stays off when the config says so', async ($, on) => {
   await clock.advance(61_000)
   await $.prompt.submit({ text: 'Add a checkout page' })
   expect(seen).toEqual([undefined])
+})
+
+test('who answers an ask: the person, or the permission mode\'s decider', async () => {
+  // Default, accept-edits and a mode not known yet put the engine's asks to the person.
+  expect(asksPerson({}, undefined)).toBe(true)
+  expect(asksPerson({}, 'default')).toBe(true)
+  expect(asksPerson({}, 'acceptEdits')).toBe(true)
+  // Auto mode's classifier answers the engine's own asks, and dontAsk refuses them.
+  expect(asksPerson({}, 'auto')).toBe(false)
+  expect(asksPerson({}, 'dontAsk')).toBe(false)
+  // Auto mode still shows the person these.
+  expect(asksPerson({ rule: 'Bash(git push:*)' }, 'auto')).toBe(true)
+  expect(asksPerson({ hook: 'PreToolUse' }, 'auto')).toBe(true)
+  expect(asksPerson({ setting: 'permissions.blockReadsOutsideWorkingDirectories' }, 'auto')).toBe(true)
+  expect(asksPerson({ ceiling: 'ask' }, 'auto')).toBe(true)
+  // A hook's ask is always the person's.
+  expect(asksPerson({ plugin: 'guard' }, 'auto')).toBe(true)
+  expect(asksPerson({ plugin: 'guard' }, 'dontAsk')).toBe(true)
+})
+
+test('auto mode: a call its classifier reviews is no question; a permission prompt that follows is', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  mock.env(on, { HOME: '/home/u' })
+  engine(on)
+  let decide!: () => void
+  const decided = new Promise<void>(r => {
+    decide = r
+  })
+  // Beneath the mod: the engine asks about the call, and its answer takes a while.
+  on('tool.check', () => ({ decision: 'ask' as const }))
+  on('classic.PermissionRequest', async () => {
+    await decided
+    return { decision: { behavior: 'allow' as const } }
+  })
+  on('tool.call', () => ({ result: {} }))
+  on('classic.UserPromptSubmit', () => ({}))
+  on('classic.Notification', () => ({}))
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+  await $.classic.UserPromptSubmit({ prompt: 'Ship it', permission_mode: 'auto' })
+  const call = $.tool.call({ tool: 'Bash', command: 'git push', description: 'Push the branch' } as never)
+  await clock.advance(2_000)
+
+  let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeUndefined()
+  await ui.unmount()
+
+  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' })
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /Needs you/ }))?.text).toBe('! Needs you: allow Push the branch (git push)?')
+  await ui.unmount()
+
+  decide()
+  await call
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeUndefined()
+  await ui.unmount()
 })

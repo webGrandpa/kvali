@@ -15,6 +15,23 @@ export const ASKS_PERSON: Record<string, string> = {
   ExitPlanMode: 'A plan is waiting for your approval',
 }
 
+/** What a `tool.check` verdict says stands behind an ask. */
+export type AskVerdict = { plugin?: string; hook?: string; rule?: string; setting?: string; ceiling?: string }
+
+/**
+ * Whether the engine's `ask` for a tool call is put to the person. A hook's ask (`plugin`) always
+ * is. The engine's own asks go to the permission mode's decider: in `dontAsk` they are refused, in
+ * `auto` a classifier approves or blocks them, except those auto mode still shows the person: a
+ * settings hook's (`hook`), an explicit ask rule's (`rule`), an option's own check (`setting`) and
+ * a connector tool the organization keeps at `ask`. A mode not known yet counts as one that asks.
+ */
+export function asksPerson(verdict: AskVerdict, mode: string | undefined): boolean {
+  if (verdict.plugin) return true
+  if (mode === 'dontAsk') return false
+  if (mode !== 'auto') return true
+  return Boolean(verdict.hook || verdict.rule || verdict.setting) || verdict.ceiling === 'ask'
+}
+
 export const EMPTY_PLAN: KvPlan = { tasks: [], durations: [], fileDurations: [] }
 export const EMPTY_USAGE: KvUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, isWholeSession: false }
 export const IDLE: KvLive = { phase: 'idle', since: 0 }

@@ -4,6 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { KvAction, KvLive, KvPhase, KvPlan, KvTask } from '../types'
 import {
   ASKS_PERSON,
+  asksPerson,
   EMPTY_PLAN,
   EMPTY_USAGE,
   IDLE,
@@ -68,6 +69,8 @@ type Running = {
   /** The same question for a phone push: no command text leaves the computer. */
   askPush?: string
   askedAt?: number
+  /** The engine asked about this call and auto mode's classifier answers: the person only if a prompt follows. */
+  review?: true
 }
 type StreamPhase = 'requesting' | 'thinking' | 'writing' | 'tool-input'
 
@@ -124,6 +127,8 @@ type Runtime = {
   budgetLeft: number | undefined
   /** Ask Claude for a plan while there is none (`autoPlan` in ~/.kvali/config.json). */
   autoPlan: boolean
+  /** The session's permission mode, as the last classic event carried it: who answers an ask. */
+  mode: string | undefined
 }
 
 const fresh = (): Runtime => ({
@@ -164,7 +169,15 @@ const fresh = (): Runtime => ({
   budgetAt: -Infinity,
   budgetLeft: undefined,
   autoPlan: true,
+  mode: undefined,
 })
+
+/** Marks a call as waiting for the person's permission. */
+function markAsk(r: Running, now: number): void {
+  r.asks = `allow ${r.label}${r.detail ? ` (${r.detail})` : ''}?`
+  r.askPush = `allow ${r.label}?`
+  r.askedAt = now
+}
 
 /**
  * What happens right now, from the engine's events. It lives with the module: a reload
@@ -560,19 +573,39 @@ export const register: Register = on => {
     return ran
   }).catch(($, e, next) => next(e)) // an observer: if it fails, the call goes on as if it were not here
 
-  // A permission prompt: the engine asks the person before the tool runs.
+  // A permission prompt: the engine asks the person before the tool runs. Where someone else
+  // answers (auto mode's classifier, a host) the call is only under review: a prompt may follow.
   on('tool.check', async ($, e, next) => {
     const verdict = await next(e)
-    if (verdict.decision === 'ask' && e.approver === 'person' && e.tool_use_id) {
-      const r = rt.running.get(e.tool_use_id)
-      if (r) {
-        r.asks = `allow ${r.label}${r.detail ? ` (${r.detail})` : ''}?`
-        r.askPush = `allow ${r.label}?`
-        r.askedAt = await $.clock.now()
-        quiet(refresh($))
-      }
-    }
+    const r = verdict.decision === 'ask' && e.tool_use_id ? rt.running.get(e.tool_use_id) : undefined
+    if (r && e.approver === 'person' && asksPerson(verdict, rt.mode)) {
+      markAsk(r, await $.clock.now())
+      quiet(refresh($))
+    } else if (r) r.review = true
     return verdict
+  }).catch(($, e, next) => next(e))
+
+  // The session's permission mode rides on the classic events: each prompt, each finished tool.
+  on('classic.UserPromptSubmit', ($, e, next) => {
+    if (e.permission_mode) rt.mode = e.permission_mode
+    return next(e)
+  }).catch(($, e, next) => next(e))
+  on('classic.PostToolUse', ($, e, next) => {
+    if (e.permission_mode) rt.mode = e.permission_mode
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // The engine shows a permission prompt: a call under review was put to the person after all
+  // (auto mode's classifier blocked three in a row, say), so it waits for them now.
+  on('classic.Notification', async ($, e, next) => {
+    if (e.permission_mode) rt.mode = e.permission_mode
+    const calls = [...rt.running.values()]
+    const r = e.notification_type === 'permission_prompt' && !calls.some(x => x.asks) ? calls.filter(x => x.review).pop() : undefined
+    if (r) {
+      markAsk(r, await $.clock.now())
+      quiet(refresh($))
+    }
+    return next(e)
   }).catch(($, e, next) => next(e))
 
   on('session.compact', async ($, e, next) => {

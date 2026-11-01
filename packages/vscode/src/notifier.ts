@@ -11,11 +11,18 @@ export interface NotifierDeps {
 }
 
 const FINISH_DEBOUNCE_MS = 2_500;
+/** A question answered (or settled by a hook or auto mode's classifier) within this sends nothing. */
+const WAITING_DELAY_MS = 5_000;
+/** At most one "needs you" notification per session in this time: the status bar shows the rest. */
+const WAITING_REPEAT_MS = 60_000;
 
 /** Shows a notification when a session finishes, needs input or fails. */
 export class Notifier {
   private readonly prev = new Map<string, SessionStatus>();
   private readonly pending = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly waiting = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly waitedAt = new Map<string, number>();
+  private readonly latest = new Map<string, AgentSession>();
   private readonly startedAt = Date.now();
   private readonly deps: NotifierDeps;
 
@@ -27,26 +34,58 @@ export class Notifier {
     const seen = new Set<string>();
     for (const s of snapshot.sessions) {
       seen.add(s.key);
+      this.latest.set(s.key, s);
       const before = this.prev.get(s.key);
       this.prev.set(s.key, s.status);
       if (s.status === 'working' || s.status === 'waiting') this.cancel(s.key);
+      if (s.status !== 'waiting') this.cancelWaiting(s.key);
 
       if (before === undefined) {
         // First sighting (e.g. right after startup): only a fresh request for input is worth a ping.
-        if (s.status === 'waiting' && s.updatedAt > this.startedAt) this.fire('waiting', s);
+        if (s.status === 'waiting' && s.updatedAt > this.startedAt) this.scheduleWaiting(s.key);
         continue;
       }
       if (before === s.status) continue;
-      if (s.status === 'waiting') this.fire('waiting', s);
+      if (s.status === 'waiting') this.scheduleWaiting(s.key);
       else if ((before === 'working' || before === 'waiting') && (s.status === 'idle' || s.status === 'done')) this.schedule(s);
       else if (before === 'working' && s.status === 'error') this.fire('error', s);
     }
-    for (const k of [...this.prev.keys()]) if (!seen.has(k)) this.prev.delete(k);
+    for (const k of [...this.prev.keys()]) {
+      if (seen.has(k)) continue;
+      this.prev.delete(k);
+      this.latest.delete(k);
+      this.cancelWaiting(k);
+    }
   }
 
   dispose(): void {
     for (const t of this.pending.values()) clearTimeout(t);
     this.pending.clear();
+    for (const t of this.waiting.values()) clearTimeout(t);
+    this.waiting.clear();
+  }
+
+  private cancelWaiting(key: string): void {
+    const t = this.waiting.get(key);
+    if (t) clearTimeout(t);
+    this.waiting.delete(key);
+  }
+
+  /** Notifies once the session has waited a moment, and not again for that session within a minute. */
+  private scheduleWaiting(key: string): void {
+    if (this.waiting.has(key)) return;
+    this.waiting.set(
+      key,
+      setTimeout(() => {
+        this.waiting.delete(key);
+        const s = this.latest.get(key);
+        if (s?.status !== 'waiting') return;
+        const now = Date.now();
+        if (now - (this.waitedAt.get(key) ?? -Infinity) < WAITING_REPEAT_MS) return;
+        this.waitedAt.set(key, now);
+        this.fire('waiting', s);
+      }, WAITING_DELAY_MS),
+    );
   }
 
   private cancel(key: string): void {
