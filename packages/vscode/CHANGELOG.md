@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.7 — 2026-11-02
+
+- **A turn's clock starts with each run.** When something other than your prompt set Claude Code going (a scheduled wake-up, a PR or task notification, a slash command), Kvali counted the time and steps from your last prompt, so a session woken after two days showed "9 steps · 2d 8h". A turn now starts whenever the agent sets off again after its last turn ended.
+
 ## 0.6.6 — 2026-11-01
 
 - **No false "Needs you" in auto mode.** In Claude Code's auto mode a classifier approves or blocks most actions by itself, and Kvali's plugin took each of those checks for a question to you. Now a call shows "Needs you" only when Claude Code puts it to you: an ask rule or a hook's ask, and the prompts auto mode falls back to (after its classifier blocks three in a row, say).

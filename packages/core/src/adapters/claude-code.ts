@@ -71,9 +71,19 @@ interface ClaudeState {
   phaseAt: number;
   errorText?: string;
   turns: number;
-  /** Tool calls since the last human prompt, and when that prompt arrived. */
+  /** Tool calls in the current (or last) turn, and when it began. */
   turnSteps: number;
   turnStartedAt?: number;
+  /**
+   * A turn runs: from a prompt, or any other message that set the model going (a scheduled
+   * wake-up, a task or PR notification, a slash command), until the model ends it.
+   */
+  turnOpen: boolean;
+  /** When the turn closed, and the response that closed it (its other lines belong to it). */
+  turnEndedAt?: number;
+  turnEndedBy?: string;
+  /** The last message on the person's side, whoever wrote it: what a new turn answers. */
+  promptAt?: number;
   live?: LiveState & { mtimeMs: number };
   /** The heartbeat Kvali's Claude Code plugin writes from inside the session. */
   pulse?: PulseFile & { mtimeMs: number };
@@ -285,6 +295,7 @@ export class ClaudeCodeAdapter implements Adapter {
       phaseAt: 0,
       turns: 0,
       turnSteps: 0,
+      turnOpen: false,
       subagents: new Map(),
       timer: new TaskTimer(),
       recent: [],
@@ -408,7 +419,17 @@ export class ClaudeCodeAdapter implements Adapter {
       st.phase = 'error';
       st.phaseAt = ts;
       st.errorText = firstLine(contentText(m.content) || 'API error', 120);
+      this.endTurn(st, ts, undefined);
       return;
+    }
+
+    // The model answers after its turn had ended: a new turn, whatever set it going (a person's
+    // prompt starts one at once, in onUser). It is timed from the message it answers, if one came.
+    const msgId = typeof m.id === 'string' ? m.id : undefined;
+    if (!st.turnOpen && !(msgId && msgId === st.turnEndedBy)) {
+      st.turnOpen = true;
+      st.turnSteps = 0;
+      st.turnStartedAt = st.promptAt !== undefined && st.promptAt >= (st.turnEndedAt ?? 0) ? st.promptAt : ts;
     }
 
     let sawToolUse = false;
@@ -429,8 +450,15 @@ export class ClaudeCodeAdapter implements Adapter {
     else if (stop === 'end_turn' || stop === 'stop_sequence' || stop === 'max_tokens' || stop === 'refusal') {
       st.phase = 'idle';
       st.open.clear();
+      this.endTurn(st, ts, msgId);
     } else st.phase = 'working';
     st.phaseAt = ts;
+  }
+
+  private endTurn(st: ClaudeState, ts: number, by: string | undefined): void {
+    st.turnOpen = false;
+    st.turnEndedAt = ts;
+    st.turnEndedBy = by;
   }
 
   private onToolUse(st: ClaudeState, block: Record<string, any>, ts: number): void {
@@ -512,8 +540,10 @@ export class ClaudeCodeAdapter implements Adapter {
       st.phase = 'interrupted';
       st.phaseAt = ts;
       st.open.clear();
+      this.endTurn(st, ts, undefined);
       return;
     }
+    st.promptAt = ts;
     const isCommand = raw.includes('<command-name>') || raw.includes('<local-command-');
     const text = stripInjectedTags(raw);
     if (!text) return;
@@ -523,6 +553,8 @@ export class ClaudeCodeAdapter implements Adapter {
       st.turns += 1;
       st.turnSteps = 0;
       st.turnStartedAt = ts;
+      st.turnOpen = true;
+      st.turnEndedBy = undefined;
     }
     if (!isCommand) {
       st.phase = 'working';

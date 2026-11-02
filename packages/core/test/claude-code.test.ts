@@ -276,3 +276,47 @@ test('Claude Code: the Kvali plugin heartbeat gives exact liveness, and its sile
   assert.equal(s.pulse, undefined);
   assert.notEqual(s.status, 'stale');
 });
+
+test('Claude Code: a session woken after its turn ended starts a new turn, timed from what woke it', async () => {
+  const home = tmpHome();
+  const clock = new Clock('2026-10-30T10:00:00.000Z');
+  const file = path.join(home, '.claude', 'projects', '-work-shop', `${SID}.jsonl`);
+  writeJsonl(file, [
+    { ...base(clock, 0), type: 'user', origin: { kind: 'human' }, message: { role: 'user', content: 'Open a PR for the checkout page' } },
+    ...assistant(clock, 1_000, 'a', [{ type: 'tool_use', id: 'tu_1', name: 'Bash', input: { command: 'gh pr create', description: 'Open the PR' } }], 'tool_use'),
+    toolResult(clock, 2_000, 'tu_1', 'https://github.com/acme/shop/pull/1'),
+    ...assistant(clock, 3_000, 'b', [{ type: 'thinking', thinking: '…' }, { type: 'text', text: 'PR opened.' }], 'end_turn'),
+  ]);
+  const engine = engineFor(new ClaudeCodeAdapter(), home, clock);
+  let s = await only(engine);
+  assert.equal(s.turn?.steps, 1);
+  const promptAt = s.turn!.startedAt;
+
+  // Two days later the PR's checks wake the session: no prompt from the person.
+  clock.advance(2 * 86_400_000);
+  const wokeAt = clock.t;
+  appendJsonl(file, [
+    { ...base(clock, 0), type: 'user', origin: { kind: 'task-notification' }, message: { role: 'user', content: 'The PR checks finished.' } },
+    ...assistant(clock, 1_000, 'c', [{ type: 'tool_use', id: 'tu_2', name: 'Bash', input: { command: 'gh pr checks 1', description: "Look at the PR's checks" } }], 'tool_use'),
+    toolResult(clock, 2_000, 'tu_2', 'all green'),
+    // A notification that arrives while the model works belongs to the same turn.
+    { ...base(clock, 2_500), type: 'user', origin: { kind: 'task-notification' }, message: { role: 'user', content: 'Another check finished.' } },
+    ...assistant(clock, 3_000, 'd', [{ type: 'tool_use', id: 'tu_3', name: 'Write', input: { file_path: '/work/shop/notes.md', content: 'ok' } }], 'tool_use'),
+  ]);
+  clock.advance(10_000);
+  s = await only(engine);
+  assert.equal(s.status, 'working');
+  assert.equal(s.turn?.startedAt, wokeAt, 'timed from the wake-up, not from the prompt two days before');
+  assert.notEqual(s.turn?.startedAt, promptAt);
+  assert.equal(s.turn?.steps, 2);
+
+  // A response with nothing before it after the turn ended (a continuation): timed from the response.
+  appendJsonl(file, [toolResult(clock, 0, 'tu_3', 'ok'), ...assistant(clock, 500, 'e', [{ type: 'text', text: 'All green.' }], 'end_turn')]);
+  clock.advance(3_600_000);
+  const resumedAt = clock.t;
+  appendJsonl(file, assistant(clock, 0, 'f', [{ type: 'tool_use', id: 'tu_4', name: 'Bash', input: { command: 'gh pr merge 1', description: 'Merge the PR' } }], 'tool_use'));
+  clock.advance(1_000);
+  s = await only(engine);
+  assert.equal(s.turn?.startedAt, resumedAt);
+  assert.equal(s.turn?.steps, 1);
+});
