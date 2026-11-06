@@ -49,6 +49,8 @@ const PANE = 'kvali'
 const TICK_MS = 2_000
 const PULSE_EVERY_MS = 10_000
 const LONG_TURN_MS = 120_000
+/** Every background agent is done and nothing woke the session in this time: the task is over. */
+const HELD_RELEASE_MS = 30_000
 /** A question to the person is worth a push only after this long unanswered: sooner, they were at the computer. */
 const ASK_PUSH_AFTER_MS = 60_000
 /** `$.fs.read` copies at most 4 MiB into the plugin. */
@@ -65,6 +67,8 @@ type Running = {
   label: string
   detail?: string
   startedAt: number
+  /** The subagent whose call it is; absent for the main loop's. */
+  agent?: string
   asks?: string
   /** The same question for a phone push: no command text leaves the computer. */
   askPush?: string
@@ -129,6 +133,15 @@ type Runtime = {
   autoPlan: boolean
   /** The session's permission mode, as the last classic event carried it: who answers an ask. */
   mode: string | undefined
+  /** Agents the main loop started in the background, at work until their run ends. */
+  background: Map<string, { label: string; startedAt: number }>
+  /** Agents whose run's end was heard: the engine's list may call one running a moment longer. */
+  finished: Set<string>
+  /**
+   * A task whose answer handed work to background agents: its end (the phone, the toast) waits
+   * for theirs and for the turn their reports start. `idleSince`: all done, and nothing woke it.
+   */
+  held: { startedAt: number; sequence?: string; followed: boolean; idleSince?: number } | undefined
 }
 
 const fresh = (): Runtime => ({
@@ -170,6 +183,9 @@ const fresh = (): Runtime => ({
   budgetLeft: undefined,
   autoPlan: true,
   mode: undefined,
+  background: new Map(),
+  finished: new Set(),
+  held: undefined,
 })
 
 /** Marks a call as waiting for the person's permission. */
@@ -190,6 +206,12 @@ function derive(now: number): KvLive {
   const all = [...rt.running.values()]
   const asking = all.filter(r => r.asks).pop()
   if (asking) return { ...base, phase: 'needs-you', since: asking.askedAt ?? asking.startedAt, label: asking.asks }
+  // The turn is over and agents it started work on: they are what runs.
+  if (!rt.turnActive && rt.background.size) {
+    const n = rt.background.size
+    const since = Math.min(...[...rt.background.values()].map(b => b.startedAt))
+    return { ...base, phase: 'running', since, label: `${n} background agent${n > 1 ? 's' : ''}` }
+  }
   const last = all.pop()
   if (last) return { ...base, phase: 'running', since: last.startedAt, label: last.label, detail: last.detail }
   if (rt.stream) {
@@ -217,6 +239,12 @@ async function doRefresh($: Engine, force: boolean): Promise<void> {
   }
   if (rt.stream && rt.pendingPhase && (rt.pendingPhase.phase !== rt.stream.phase || rt.pendingPhase.label !== rt.stream.label)) {
     rt.stream = { phase: rt.pendingPhase.phase, since: now, label: rt.pendingPhase.label }
+  }
+  if (rt.held?.idleSince !== undefined && !rt.turnActive && now - rt.held.idleSince >= HELD_RELEASE_MS) {
+    const { startedAt, sequence, followed, idleSince } = rt.held
+    rt.held = undefined
+    rt.ended = { phase: 'done', since: idleSince, lastTurnMs: idleSince - startedAt }
+    quiet(finish($, 'done', idleSince - startedAt, sequence, followed, now))
   }
   const l = derive(now)
   await loadPhone($, now)
@@ -317,7 +345,7 @@ function turnSeq(now: number): string {
  */
 async function pulse($: Engine, l: KvLive, now: number, force: boolean): Promise<void> {
   if (!rt.pulseFile) return
-  const key = [l.phase, l.since, l.label ?? ''].join('|')
+  const key = [l.phase, l.since, l.label ?? '', rt.background.size].join('|')
   const due = isActivePhase(l.phase) ? now - rt.lastPulseAt >= PULSE_EVERY_MS : false
   if (!force && key === rt.lastPulseKey && !due) return
   rt.lastPulseKey = key
@@ -336,6 +364,7 @@ async function pulse($: Engine, l: KvLive, now: number, force: boolean): Promise
     detail: l.detail,
     lastDataAt: l.lastDataAt,
     turnStartedAt: l.turnStartedAt,
+    background: rt.background.size,
     step: pr.current && p.step ? { title: pr.current.title, startedAt: p.step.startedAt, actions: p.step.actions, typicalMs: typicalMs(p) } : undefined,
   }
   try {
@@ -438,6 +467,54 @@ async function push($: Engine, kind: PushKind, extra: { label?: string; workedMs
   }
 }
 
+/**
+ * A task's end on the phone and in Claude Code. A task the phone followed always gets its end,
+ * other tasks only when they were long; a stop in the middle of the plan asks the person
+ * something, so it waits like a question.
+ */
+async function finish($: Engine, phase: KvPhase, workedMs: number, sequence: string | undefined, followed: boolean, now: number): Promise<void> {
+  if (phase === 'error') quiet(push($, 'error', { label: rt.ended?.label, sequence }))
+  if (phase === 'done' && (workedMs >= (rt.phone?.doneAfterSec ?? 120) * 1000 || followed)) {
+    const pr = progress((await read($, plan)).tasks)
+    if (pr.total > 0 && pr.done < pr.total) rt.pendingPause = { at: now, workedMs, sequence }
+    else quiet(push($, 'finished', { workedMs, sequence }))
+  }
+  if (workedMs >= LONG_TURN_MS && phase !== 'interrupted') {
+    const p = progress((await read($, plan)).tasks)
+    const text = phase === 'done' ? `Done in ${fmtDuration(workedMs)}${p.total ? ` · ${p.done}/${p.total} tasks` : ''}` : `Stopped: ${rt.ended?.label}`
+    $.ui.toast(text)
+    quiet($.ui.notify(text, { title: 'Claude Code' }))
+  }
+}
+
+/**
+ * Checks the background agents against the engine's own list, which knows one that ended unheard.
+ * After an answer, an agent of the main loop still at work is a background one (Kvali may have
+ * loaded after it started).
+ */
+async function countBackground($: Engine, afterAnswer: boolean): Promise<void> {
+  let agents: Awaited<ReturnType<Engine['agent']['list']>>
+  try {
+    agents = await $.agent.list()
+  } catch {
+    return
+  }
+  const now = await $.clock.now()
+  for (const a of agents) {
+    if (a.parentId || a.teammateId) continue
+    const atWork = a.status === 'running' || a.status === 'pending' || a.status === 'waiting'
+    if (!atWork) rt.background.delete(a.id)
+    else if (afterAnswer && !rt.background.has(a.id) && !rt.finished.has(a.id)) rt.background.set(a.id, { label: a.description, startedAt: now })
+  }
+}
+
+/** Forgets the calls of a finished loop: the main loop's, or a subagent's when `agent` is given. */
+function dropCalls(agent?: string): void {
+  for (const [id, r] of rt.running) {
+    if (agent !== undefined ? r.agent === agent : !r.agent || !rt.background.has(r.agent)) rt.running.delete(id)
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
@@ -485,8 +562,10 @@ export const register: Register = on => {
       rt.betweenSince = now
       rt.ended = undefined
       rt.stream = undefined
-      rt.running.clear()
-      rt.turnSeq = turnSequence(rt.sessionId, now)
+      dropCalls()
+      // A turn that background agents' reports set going (or a prompt meanwhile) is part of their task.
+      rt.turnSeq = rt.held?.sequence ?? turnSequence(rt.sessionId, now)
+      if (rt.held) rt.held.idleSince = undefined
       rt.progressSent = false
       rt.pendingPause = undefined // the person answered
       rt.progressSentDone = progress((await read($, plan)).tasks).done
@@ -549,7 +628,7 @@ export const register: Register = on => {
     if (!e.agentId) rt.turnActive = true
     if (!isPlan) {
       const d = describeTool(e.tool, input, rt.cwd)
-      rt.running.set(id, { ...d, startedAt: now, asks: ASKS_PERSON[e.tool], askedAt: ASKS_PERSON[e.tool] ? now : undefined })
+      rt.running.set(id, { ...d, startedAt: now, agent: e.agentId, asks: ASKS_PERSON[e.tool], askedAt: ASKS_PERSON[e.tool] ? now : undefined })
       await update($, recent, list => pushAction(list, { id, label: d.label, detail: d.detail, startedAt: now }))
       await update($, plan, p => (p.step ? { ...p, step: { ...p.step, actions: p.step.actions + 1 } } : p))
       quiet(refresh($))
@@ -619,39 +698,60 @@ export const register: Register = on => {
     }
    }).catch(($, e, next) => next(e))
 
+  // An agent the model started in the background: the turn may end while it works on.
+  on('agent.spawn', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      if (e.background && !e.parentAgentId && !e.isTeammate && !e.workflow && r.agentId) {
+        rt.background.set(r.agentId, { label: e.description, startedAt: await $.clock.now() })
+        quiet(refresh($))
+      }
+    } catch {
+      // an observer: the spawn stands
+    }
+    return r
+  })
+
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
-    if (e.agentId) return result
     const now = await $.clock.now()
+    if (e.agentId) {
+      // A background agent's run ended: the task it was part of may be over.
+      rt.finished.add(e.agentId)
+      if (rt.background.delete(e.agentId)) {
+        dropCalls(e.agentId)
+        if (rt.background.size === 0 && rt.held && !rt.turnActive) rt.held.idleSince = now
+        quiet(refresh($, true))
+      }
+      return result
+    }
     rt.turnActive = false
     rt.stream = undefined
-    rt.running.clear()
+    await countBackground($, e.reason === 'answer')
+    dropCalls()
     const phase: KvPhase = e.reason === 'answer' ? 'done' : e.reason === 'aborted' ? 'interrupted' : 'error'
+    // A task that background agents carried on is timed from its first turn.
+    const held = rt.held
+    const workedMs = held ? now - held.startedAt : e.durationMs
+    const sequence = held?.sequence ?? rt.turnSeq
+    const followed = rt.progressSent || held?.followed === true
     rt.ended = {
       phase,
       since: now,
-      lastTurnMs: e.durationMs,
+      lastTurnMs: workedMs,
       label: e.reason === 'refusal' ? 'the model declined' : e.reason === 'error' ? 'an API error ended the turn' : undefined,
     }
-    const sequence = rt.turnSeq
-    const followed = rt.progressSent
     rt.turnSeq = undefined
     rt.progressSent = false
+    if (phase === 'done' && rt.background.size > 0) {
+      // The answer handed work to agents in the background: the task ends when they are done.
+      rt.held = { startedAt: held?.startedAt ?? now - e.durationMs, sequence, followed }
+      await refresh($, true)
+      return result
+    }
+    rt.held = undefined
     await refresh($, true)
-    if (phase === 'error') quiet(push($, 'error', { label: rt.ended.label, sequence }))
-    // A turn the phone followed always gets its end; other turns only when they were long.
-    // A stop in the middle of the plan asks the person something, so it waits like a question.
-    if (phase === 'done' && (e.durationMs >= (rt.phone?.doneAfterSec ?? 120) * 1000 || followed)) {
-      const pr = progress((await read($, plan)).tasks)
-      if (pr.total > 0 && pr.done < pr.total) rt.pendingPause = { at: now, workedMs: e.durationMs, sequence }
-      else quiet(push($, 'finished', { workedMs: e.durationMs, sequence }))
-    }
-    if (e.durationMs >= LONG_TURN_MS && phase !== 'interrupted') {
-      const p = progress((await read($, plan)).tasks)
-      const text = phase === 'done' ? `Done in ${fmtDuration(e.durationMs)}${p.total ? ` · ${p.done}/${p.total} tasks` : ''}` : `Stopped: ${rt.ended.label}`
-      $.ui.toast(text)
-      quiet($.ui.notify(text, { title: 'Claude Code' }))
-    }
+    await finish($, phase, workedMs, sequence, followed, now)
     return result
   })
 
@@ -659,6 +759,8 @@ export const register: Register = on => {
     rt.turnActive = false
     rt.stream = undefined
     rt.running.clear()
+    rt.background.clear() // they end with the session
+    rt.held = undefined
     rt.ended = { phase: 'ended', since: await $.clock.now() }
     rt.pendingPause = undefined
     await refresh($, true).catch(() => undefined)

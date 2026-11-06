@@ -490,3 +490,95 @@ test('auto mode: a call its classifier reviews is no question; a permission prom
   expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeUndefined()
   await ui.unmount()
 })
+
+/** Beneath the mod: the engine starts each agent and lists them with the statuses given. */
+function agents(on: On, status: Record<string, string> = {}): Record<string, string> {
+  let n = 0
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: `a${++n}` }))
+  on('agent.list', () => ({
+    value: Array.from({ length: n }, (_, i) => ({ id: `a${i + 1}`, description: `agent ${i + 1}`, type: 'general-purpose', status: (status[`a${i + 1}`] ?? 'running') as never })),
+  }))
+  return status
+}
+const background = (description: string) => ({ tool_use_id: `tu_${description}`, prompt: '…', description, subagentType: 'general-purpose', parentModel: 'claude-opus-5-5', background: true, fork: false }) as never
+const lastBeat = (writes: { path: string; text: string }[]) => JSON.parse(writes.filter(w => w.path.endsWith('.mod.json')).at(-1)!.text)
+
+test('agents in the background: the task ends with them, not with the turn that started them', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  mock.env(on, { HOME: '/home/u' })
+  const phone = { phone: { server: 'https://ntfy.example.com', topic: 'kvali-test', events: ['needs-you', 'done', 'error', 'stuck'], details: true } }
+  const { pushes, writes, toasts } = engine(on, { '/home/u/.kvali/config.json': { text: JSON.stringify(phone), mtimeMs: T0 } })
+  agents(on, { a3: 'completed' })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('tool.call', () => ({ result: {} }))
+  await $.session.start({ cwd: '/w/shop', surface: 'desktop', isInteractive: true })
+
+  await $.turn.start({ text: 'review auth and write the missing tests', turnId: 't1' })
+  await $.agent.spawn(background('Review auth'))
+  await $.agent.spawn(background('Write tests'))
+  // A foreground agent is the turn's own work: done before the turn is.
+  await $.agent.spawn({ ...(background('Map the module') as object), background: false } as never)
+  await $.turn.complete({ agentId: 'a3', answer: 'Mapped.', durationMs: 30_000, isAborted: false, turnId: 'ta3', reason: 'answer' })
+  await clock.advance(150_000)
+  await $.turn.complete({ answer: 'Two agents are on it.', durationMs: 150_000, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(1_000)
+  expect(pushes).toHaveLength(0)
+  expect(toasts).toHaveLength(0)
+  expect(lastBeat(writes)).toMatchObject({ phase: 'running', label: '2 background agents', background: 2 })
+  let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /background agents/ }))?.text).toMatch(/^◌ Running “2 background agents” · /)
+  await ui.unmount()
+
+  // One agent's run ends; its report wakes the session for a short turn. The other works on.
+  await clock.advance(10 * 60_000)
+  await $.turn.complete({ agentId: 'a1', answer: 'Reviewed.', durationMs: 600_000, isAborted: false, turnId: 'ta1', reason: 'answer' })
+  await $.turn.start({ text: '<task-notification>', turnId: 't2' })
+  await clock.advance(20_000)
+  await $.turn.complete({ answer: 'The review is in.', durationMs: 20_000, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(1_000)
+  expect(pushes).toHaveLength(0)
+  expect(lastBeat(writes)).toMatchObject({ phase: 'running', label: '1 background agent', background: 1 })
+
+  // The last one ends, and the turn its report starts ends the task: one push, timed from the start.
+  await clock.advance(5 * 60_000)
+  await $.turn.complete({ agentId: 'a2', answer: 'Tests written.', durationMs: 900_000, isAborted: false, turnId: 'ta2', reason: 'answer' })
+  await $.turn.start({ text: '<task-notification>', turnId: 't3' })
+  await clock.advance(10_000)
+  await $.turn.complete({ answer: 'All done.', durationMs: 10_000, isAborted: false, turnId: 't3', reason: 'answer' })
+  await clock.advance(1_000)
+  expect(pushes).toHaveLength(1)
+  expect(pushes[0]!.body).toMatchObject({ title: 'Claude Code finished · w', message: 'Done in 18m 02s' })
+  expect(toasts).toEqual(['Done in 18m 02s'])
+  expect(lastBeat(writes)).toMatchObject({ phase: 'done', background: 0 })
+})
+
+test('agents in the background: an end nothing reports, a stop from the list, and nothing that woke it', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  mock.env(on, { HOME: '/home/u' })
+  const phone = { phone: { server: 'https://ntfy.example.com', topic: 'kvali-test', events: ['done'], details: true } }
+  const { pushes, writes } = engine(on, { '/home/u/.kvali/config.json': { text: JSON.stringify(phone), mtimeMs: T0 } })
+  // The second agent was stopped from Claude Code's task list.
+  agents(on, { a2: 'killed' })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  await $.session.start({ cwd: '/w/shop', surface: 'terminal', isInteractive: true })
+
+  await $.turn.start({ text: 'migrate both halves', turnId: 't1' })
+  await $.agent.spawn(background('First half'))
+  await $.agent.spawn(background('Second half'))
+  await clock.advance(180_000)
+  await $.turn.complete({ answer: 'Running.', durationMs: 180_000, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect(lastBeat(writes)).toMatchObject({ label: '1 background agent', background: 1 })
+
+  // The first ends and nothing wakes the session: after half a minute the task is over.
+  await clock.advance(60_000)
+  await $.turn.complete({ agentId: 'a1', answer: 'Migrated.', durationMs: 240_000, isAborted: false, turnId: 'ta1', reason: 'answer' })
+  await clock.advance(20_000)
+  expect(pushes).toHaveLength(0)
+  await clock.advance(12_000)
+  expect(pushes).toHaveLength(1)
+  expect(pushes[0]!.body).toMatchObject({ title: 'Claude Code finished · w' })
+  expect(pushes[0]!.body.message).toMatch(/^Done in 4m 00s/)
+  expect(lastBeat(writes)).toMatchObject({ phase: 'done', background: 0 })
+})

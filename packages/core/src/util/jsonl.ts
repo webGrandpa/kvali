@@ -34,6 +34,11 @@ export class JsonlTail {
     return this.offset;
   }
 
+  /** When the file was last modified, as of the last read (-1 before the first). */
+  get modifiedAt(): number {
+    return this.mtimeMs;
+  }
+
   async read(onRecord: (record: unknown) => void, onReset?: () => void): Promise<TailResult> {
     let st;
     try {

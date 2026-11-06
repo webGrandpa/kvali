@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.8 — 2026-11-06
+
+- **Agents in the background count as work.** When Claude ended its answer while agents it had started in the background worked on, Kvali showed the session as Idle and sent "finished". Now the session stays "working" ("Waiting for 2 background agents") until each one reports back, and the "finished" notification, on the phone too, comes once at the real end, timed from the start. A workflow run in the background counts the same way, and its agents' tokens are added to the session.
+- The subagent count on a card no longer lights up for old subagents right after Kvali starts.
+
 ## 0.6.7 — 2026-11-02
 
 - **A turn's clock starts with each run.** When something other than your prompt set Claude Code going (a scheduled wake-up, a PR or task notification, a slash command), Kvali counted the time and steps from your last prompt, so a session woken after two days showed "9 steps · 2d 8h". A turn now starts whenever the agent sets off again after its last turn ended.

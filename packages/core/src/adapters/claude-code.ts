@@ -3,7 +3,8 @@
  *
  * Reads (all local, read-only):
  *   <config>/projects/<slug>/<sessionId>.jsonl          session transcript
- *   <config>/projects/<slug>/<sessionId>/subagents/*.jsonl   subagent transcripts (tokens only)
+ *   <config>/projects/<slug>/<sessionId>/subagents/*.jsonl   subagent transcripts (tokens only;
+ *                                                         a workflow's agents in workflows/<run>/)
  *   <config>/projects/<slug>/agent-*.jsonl              subagent transcripts, older layout (tokens only)
  *   <config>/tasks/<sessionId>/*.json                   the session's task list (TaskCreate/TaskUpdate)
  *   <liveDir>/claude-code/<sessionId>.json              optional live state from Kvali's hooks
@@ -12,6 +13,9 @@
  * Progress comes from the agent's own plan: the Tasks tools (TaskCreate/TaskUpdate)
  * or the older TodoWrite tool. Tokens are summed from `message.usage`, de-duplicated
  * by message id because Claude Code writes one line per content block.
+ *
+ * Agents and workflows started in the background keep the session working after its turn
+ * ends: from the call's `async_launched` result until their `<task-notification>` arrives.
  */
 import path from 'node:path';
 import type { Adapter, AdapterContext } from '../adapter.ts';
@@ -87,7 +91,12 @@ interface ClaudeState {
   live?: LiveState & { mtimeMs: number };
   /** The heartbeat Kvali's Claude Code plugin writes from inside the session. */
   pulse?: PulseFile & { mtimeMs: number };
-  subagents: Map<string, { tail: JsonlTail; updatedAt: number }>;
+  subagents: Map<string, { tail: JsonlTail }>;
+  /**
+   * Agents and workflows the session started in the background that have not reported back.
+   * Claude Code tells the session each one's end in a `<task-notification>`, which wakes it.
+   */
+  background: Map<string, { kind: 'agent' | 'workflow'; label: string; startedAt: number }>;
   timer: TaskTimer;
   recent: Activity[];
   trouble?: { message: string; at: number; attempt?: number; maxAttempts?: number };
@@ -105,6 +114,11 @@ interface PulseFile {
   lastDataAt?: number;
   /** The plugin sends this session's phone notifications. */
   push?: boolean;
+  /**
+   * Agents the session runs in the background, as the plugin counts them (from 0.6.8). It hears
+   * each one end, a stop from Claude Code's task list too, which leaves no mark in the transcript.
+   */
+  background?: number;
 }
 
 /** The plugin rewrites its heartbeat at least every 10 s while a turn runs. */
@@ -117,6 +131,38 @@ const WAITING_NOTIFICATIONS = new Set([
   'elicitation_url_dialog',
   'agent_needs_input',
 ]);
+
+/** `<task-notification>` blocks: how Claude Code tells the session a background task changed. */
+const TASK_NOTIFICATION = /<task-notification>([\s\S]*?)(?:<\/task-notification>|$)/g;
+/** Notification statuses that do not end the task. */
+const STILL_RUNNING = new Set(['running', 'pending', 'waiting', 'blocked']);
+
+/** The background tasks a message reports as ended (completed, failed, killed, ...). */
+export function endedBackgroundTasks(text: string): string[] {
+  const ids: string[] = [];
+  for (const m of text.matchAll(TASK_NOTIFICATION)) {
+    const body = m[1] ?? '';
+    const id = /<task-id>([^<]+)<\/task-id>/.exec(body)?.[1]?.trim();
+    const status = /<status>([^<]*)<\/status>/.exec(body)?.[1]?.trim().toLowerCase();
+    if (id && status && !STILL_RUNNING.has(status)) ids.push(id);
+  }
+  return ids;
+}
+
+/** "2 background agents", "1 workflow", "2 background agents and 1 workflow". */
+function backgroundLabel(tasks: Iterable<{ kind: 'agent' | 'workflow' }>): string {
+  let agents = 0;
+  let workflows = 0;
+  for (const t of tasks) {
+    if (t.kind === 'workflow') workflows += 1;
+    else agents += 1;
+  }
+  const parts = [
+    agents ? `${agents} background agent${agents > 1 ? 's' : ''}` : '',
+    workflows ? `${workflows} workflow${workflows > 1 ? 's' : ''}` : '',
+  ].filter(Boolean);
+  return parts.join(' and ');
+}
 
 function normStatus(s: unknown): TaskStatus {
   switch (s) {
@@ -297,6 +343,7 @@ export class ClaudeCodeAdapter implements Adapter {
       turnSteps: 0,
       turnOpen: false,
       subagents: new Map(),
+      background: new Map(),
       timer: new TaskTimer(),
       recent: [],
       lastSubagentScan: 0,
@@ -356,6 +403,15 @@ export class ClaudeCodeAdapter implements Adapter {
           st.errorText = firstLine(String(o.content ?? o.error ?? 'API error'), 120);
         }
         return;
+      case 'attachment': {
+        // A notification that came while a turn ran: it rides along with the turn's next request.
+        const a = o.attachment;
+        if (a?.type === 'queued_command') {
+          const text = contentText(a.prompt);
+          if (text.includes('<task-notification>')) for (const id of endedBackgroundTasks(text)) st.background.delete(id);
+        }
+        return;
+      }
       default:
         return;
     }
@@ -528,13 +584,33 @@ export class ClaudeCodeAdapter implements Adapter {
         if (done) done.endedAt = ts;
         st.open.delete(b.tool_use_id);
       }
+      // An agent or workflow started in the background: the call returns at once, the work goes on.
+      const launched = o.toolUseResult;
+      if (launched && typeof launched === 'object' && launched.status === 'async_launched' && !launched.error) {
+        const agentId = typeof launched.agentId === 'string' ? launched.agentId : undefined;
+        const id = agentId ?? (typeof launched.taskId === 'string' ? launched.taskId : undefined);
+        const label = [launched.description, launched.workflowName, launched.summary].find((v) => typeof v === 'string' && v.trim());
+        if (id) st.background.set(id, { kind: agentId ? 'agent' : 'workflow', label: label ? truncate(label, 60) : '', startedAt: ts });
+      }
       st.phase = st.open.size > 0 ? 'tool' : 'working';
       st.phaseAt = ts;
       return;
     }
 
-    if (o.isMeta) return;
     const raw = contentText(content);
+    // Background work reporting back. Claude Code sets the model going with it, so the session
+    // works again; the model's answer opens the turn.
+    const notice = raw.includes('<task-notification>');
+    if (notice) {
+      for (const id of endedBackgroundTasks(raw)) st.background.delete(id);
+      st.promptAt = ts;
+      if (!st.turnOpen) {
+        st.phase = 'working';
+        st.phaseAt = ts;
+        st.activity = { kind: 'thinking', label: 'Thinking', startedAt: ts };
+      }
+    }
+    if (o.isMeta) return;
     if (!raw) return;
     if (/^\s*\[Request interrupted by user/.test(raw)) {
       st.phase = 'interrupted';
@@ -548,7 +624,7 @@ export class ClaudeCodeAdapter implements Adapter {
     const text = stripInjectedTags(raw);
     if (!text) return;
     const origin = o.origin?.kind;
-    if (!isCommand && (origin === undefined || origin === 'human')) {
+    if (!isCommand && !notice && (origin === undefined || origin === 'human')) {
       st.firstPrompt ??= firstLine(text, 100);
       st.turns += 1;
       st.turnSteps = 0;
@@ -620,16 +696,18 @@ export class ClaudeCodeAdapter implements Adapter {
     if (now - st.lastSubagentScan >= 5_000) {
       st.lastSubagentScan = now;
       const subDir = path.join(st.projectDir, st.sessionId, 'subagents');
-      for (const f of await listDir(subDir)) {
-        if (!f.isFile() || !f.name.endsWith('.jsonl')) continue;
-        const file = path.join(subDir, f.name);
-        if (!st.subagents.has(file)) st.subagents.set(file, { tail: new JsonlTail(file), updatedAt: 0 });
+      const dirs = [subDir];
+      // A workflow's agents write to subagents/workflows/<run>/.
+      for (const run of await listDir(path.join(subDir, 'workflows'))) if (run.isDirectory()) dirs.push(path.join(subDir, 'workflows', run.name));
+      for (const dir of dirs) {
+        for (const f of await listDir(dir)) {
+          if (!f.isFile() || !f.name.endsWith('.jsonl')) continue;
+          const file = path.join(dir, f.name);
+          if (!st.subagents.has(file)) st.subagents.set(file, { tail: new JsonlTail(file) });
+        }
       }
     }
-    for (const [, sub] of st.subagents) {
-      const res = await sub.tail.read((rec) => this.onRecord(st, rec, ctx, true));
-      if (res.changed) sub.updatedAt = now;
-    }
+    for (const [, sub] of st.subagents) await sub.tail.read((rec) => this.onRecord(st, rec, ctx, true));
   }
 
   /** Older Claude Code versions wrote subagents as top-level agent-*.jsonl files that reference the parent session. */
@@ -706,9 +784,37 @@ export class ClaudeCodeAdapter implements Adapter {
       }
     }
 
+    // The answer handed work to agents in the background: the session works until each one
+    // reports back (Claude Code then wakes it with the result).
+    const beat = st.pulse;
+    let background: Activity | undefined;
+    if (st.background.size > 0) {
+      // They end with their session, and the plugin's count (written after the turn ended) is
+      // exact: those it no longer counts were stopped.
+      const endedAt = Math.max(live?.event === 'SessionEnd' ? (live.at ?? 0) : 0, beat?.phase === 'ended' ? beat.at : 0);
+      const counted = beat && typeof beat.background === 'number' && beat.at >= (st.turnEndedAt ?? 0) - 5_000 ? beat : undefined;
+      for (const [id, b] of st.background) {
+        if (b.startedAt <= endedAt || (counted?.background === 0 && b.kind === 'agent' && b.startedAt <= counted.at)) st.background.delete(id);
+      }
+      // Transcripts silent for as long as a stuck session's: they ended unseen (closed, stopped).
+      let lastWrite = st.updatedAt;
+      for (const sub of st.subagents.values()) lastWrite = Math.max(lastWrite, sub.tail.modifiedAt);
+      const tasks = [...st.background.values()];
+      if (tasks.length > 0 && !st.turnOpen && (status === 'idle' || status === 'done') && now - lastWrite < ctx.staleAfterMs) {
+        status = 'working';
+        detail = undefined;
+        background = {
+          kind: 'subagent',
+          label: backgroundLabel(tasks),
+          detail: truncate(tasks.map((t) => t.label).filter(Boolean).join(', '), 90) || undefined,
+          startedAt: st.turnEndedAt ?? now,
+        };
+        lastSignal = Math.max(lastSignal, lastWrite);
+      }
+    }
+
     // The plugin's heartbeat is exact: it reports the model's stream and tools as they happen.
     let pulse: AgentSession['pulse'];
-    const beat = st.pulse;
     if (beat && beat.at >= st.startedAt && PULSE_ACTIVE.has(beat.phase as PulsePhase)) {
       if (now - beat.at < PULSE_FRESH_MS) {
         pulse = { phase: beat.phase as PulsePhase, since: beat.since, at: beat.at, label: beat.label, detail: beat.detail, lastDataAt: beat.lastDataAt };
@@ -733,12 +839,14 @@ export class ClaudeCodeAdapter implements Adapter {
       }
     }
 
-    const activeSubagents = [...st.subagents.values()].filter((s) => now - s.updatedAt < 60_000).length;
+    // Subagents whose transcripts were written in the last minute, by the files' own times: a
+    // transcript read for the first time (Kvali just started) is not a sign of life.
+    const activeSubagents = [...st.subagents.values()].filter((s) => s.tail.modifiedAt > 0 && now - s.tail.modifiedAt < 60_000).length;
     const window = /\[1m\]/i.test(st.model ?? '') || st.maxContext > 200_000 ? 1_000_000 : 200_000;
     const ownTitle = st.customTitle || st.aiTitle || st.summary;
     const title = ownTitle || st.firstPrompt || 'Untitled session';
 
-    let activity = status === 'working' ? st.activity : undefined;
+    let activity = status === 'working' ? (background ?? st.activity) : undefined;
     if (status === 'working' && st.phase === 'tool' && st.open.size > 0) activity = [...st.open.values()].pop();
 
     return {

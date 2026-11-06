@@ -320,3 +320,163 @@ test('Claude Code: a session woken after its turn ended starts a new turn, timed
   assert.equal(s.turn?.startedAt, resumedAt);
   assert.equal(s.turn?.steps, 1);
 });
+
+test('Claude Code: agents started in the background keep the session working until they report back', async () => {
+  const home = tmpHome();
+  const clock = new Clock('2026-10-30T10:00:00.000Z');
+  const dir = path.join(home, '.claude', 'projects', '-work-shop');
+  const file = path.join(dir, `${SID}.jsonl`);
+  // What the Agent tool answers for run_in_background, and what Claude Code sends when one ends.
+  const launched = (agentId: string, description: string) => ({ isAsync: true, status: 'async_launched', agentId, description, prompt: '…', outputFile: `/tmp/${agentId}.output` });
+  const notice = (id: string, status: string) =>
+    `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>tu_${id}</tool-use-id>\n<status>${status}</status>\n<summary>Agent "${id}" ${status}</summary>\n<result>…</result>\n</task-notification>`;
+  /** A subagent's transcript, last written at the clock's current time. */
+  const subagentWrites = (id: string) => {
+    const f = path.join(dir, SID, 'subagents', `agent-${id}.jsonl`);
+    writeJsonl(f, assistant(clock, 0, `sub_${id}`, [{ type: 'tool_use', id: `tu_s_${id}`, name: 'Read', input: { file_path: '/work/shop/auth.ts' } }], 'tool_use'));
+    utimesSync(f, clock.t / 1000, clock.t / 1000);
+  };
+
+  writeJsonl(file, [
+    { ...base(clock, 0), type: 'user', origin: { kind: 'human' }, message: { role: 'user', content: 'Review the auth module and write the missing tests' } },
+    ...assistant(clock, 1_000, 'a', [
+      { type: 'tool_use', id: 'tu_1', name: 'Agent', input: { description: 'Review auth', prompt: '…', subagent_type: 'general-purpose', run_in_background: true } },
+      { type: 'tool_use', id: 'tu_2', name: 'Agent', input: { description: 'Write tests', prompt: '…', subagent_type: 'general-purpose', run_in_background: true } },
+    ], 'tool_use'),
+    toolResult(clock, 2_000, 'tu_1', 'Async agent launched successfully.', launched('a1', 'Review auth')),
+    toolResult(clock, 2_001, 'tu_2', 'Async agent launched successfully.', launched('a2', 'Write tests')),
+    ...assistant(clock, 3_000, 'b', [{ type: 'text', text: 'Two agents are on it.' }], 'end_turn'),
+  ]);
+  const handedOffAt = clock.t + 3_000;
+  clock.advance(5_000);
+  const engine = engineFor(new ClaudeCodeAdapter(), home, clock);
+  let s = await only(engine);
+  assert.equal(s.status, 'working', 'the answer ended the turn, the agents work on');
+  assert.deepEqual([s.activity?.kind, s.activity?.label, s.activity?.detail, s.activity?.startedAt], ['subagent', '2 background agents', 'Review auth, Write tests', handedOffAt]);
+
+  // Their transcripts keep it alive past the time a silent session would count as stuck.
+  clock.advance(25 * 60_000);
+  subagentWrites('a1');
+  clock.advance(20 * 60_000);
+  s = await only(engine);
+  assert.equal(s.status, 'working');
+  assert.equal(s.activeSubagents, undefined, 'none wrote in the last minute');
+  // Nothing written anywhere for half an hour: they ended unseen (Claude Code closed, say).
+  clock.advance(11 * 60_000);
+  s = await only(engine);
+  assert.equal(s.status, 'idle');
+  assert.equal(s.statusDetail, undefined);
+  // Still at it after all.
+  subagentWrites('a2');
+  clock.advance(5_000);
+  s = await only(engine);
+  assert.equal(s.status, 'working');
+  assert.equal(s.activeSubagents, 1);
+
+  // One reports back: Claude Code wakes the session with it, the answer leaves one at work.
+  appendJsonl(file, [{ ...base(clock, 0), type: 'user', origin: { kind: 'task-notification' }, message: { role: 'user', content: notice('a1', 'completed') } }]);
+  s = await only(engine);
+  assert.equal(s.status, 'working');
+  assert.equal(s.activity?.kind, 'thinking');
+  appendJsonl(file, assistant(clock, 2_000, 'c', [{ type: 'text', text: 'The review is in; tests are still being written.' }], 'end_turn'));
+  clock.advance(5_000);
+  s = await only(engine);
+  assert.equal(s.status, 'working');
+  assert.deepEqual([s.activity?.label, s.activity?.detail], ['1 background agent', 'Write tests']);
+  assert.equal(s.turns, 1, 'a notification is not a prompt from the person');
+
+  // The last one reports back while the person's next turn runs: when that turn ends, all is done.
+  appendJsonl(file, [
+    { ...base(clock, 0), type: 'user', origin: { kind: 'human' }, message: { role: 'user', content: 'Also bump the version' } },
+    ...assistant(clock, 1_000, 'd', [{ type: 'tool_use', id: 'tu_3', name: 'Edit', input: { file_path: '/work/shop/package.json' } }], 'tool_use'),
+    { ...base(clock, 1_500), type: 'attachment', attachment: { type: 'queued_command', prompt: notice('a2', 'failed'), origin: { kind: 'task-notification' } } },
+    toolResult(clock, 2_000, 'tu_3', 'ok'),
+    ...assistant(clock, 3_000, 'e', [{ type: 'text', text: 'Bumped. The test writer failed; want me to retry?' }], 'end_turn'),
+  ]);
+  clock.advance(5_000);
+  s = await only(engine);
+  assert.equal(s.status, 'idle');
+  assert.equal(s.activity, undefined);
+
+  // Agents end with their session.
+  appendJsonl(file, [
+    { ...base(clock, 0), type: 'user', origin: { kind: 'human' }, message: { role: 'user', content: 'Retry it in the background' } },
+    ...assistant(clock, 1_000, 'f', [{ type: 'tool_use', id: 'tu_4', name: 'Agent', input: { description: 'Write tests', prompt: '…', run_in_background: true } }], 'tool_use'),
+    toolResult(clock, 2_000, 'tu_4', 'Async agent launched successfully.', launched('a3', 'Write tests')),
+    ...assistant(clock, 3_000, 'g', [{ type: 'text', text: 'Retrying.' }], 'end_turn'),
+  ]);
+  clock.advance(5_000);
+  s = await only(engine);
+  assert.equal(s.status, 'working');
+  writeText(path.join(home, '.kvali', 'live', 'claude-code', `${SID}.json`), JSON.stringify({ event: 'SessionEnd', at: clock.t }));
+  clock.advance(1_000);
+  s = await only(engine);
+  assert.equal(s.status, 'idle');
+  assert.equal(s.statusDetail, 'Session ended');
+});
+
+test('Claude Code: a workflow started in the background counts as work until it reports back', async () => {
+  const home = tmpHome();
+  const clock = new Clock('2026-10-30T10:00:00.000Z');
+  const dir = path.join(home, '.claude', 'projects', '-work-shop');
+  const file = path.join(dir, `${SID}.jsonl`);
+  writeJsonl(file, [
+    { ...base(clock, 0), type: 'user', origin: { kind: 'human' }, message: { role: 'user', content: 'Run the review workflow' } },
+    ...assistant(clock, 1_000, 'a', [
+      { type: 'tool_use', id: 'tu_1', name: 'Workflow', input: { script: '…' } },
+      { type: 'tool_use', id: 'tu_2', name: 'Workflow', input: { script: '…' } },
+    ], 'tool_use'),
+    toolResult(clock, 2_000, 'tu_1', 'Workflow launched.', { status: 'async_launched', taskId: 'w7k2', taskType: 'local_workflow', workflowName: 'review-changes', runId: 'wf_1', summary: 'Review changed files' }),
+    // A script that does not compile starts nothing.
+    toolResult(clock, 2_100, 'tu_2', 'Workflow failed.', { status: 'async_launched', taskId: 'w9x9', taskType: 'local_workflow', workflowName: 'broken', error: 'compile failed' }),
+    ...assistant(clock, 3_000, 'b', [{ type: 'text', text: 'The workflow is running.' }], 'end_turn'),
+  ]);
+  // Its agents' transcripts live under subagents/workflows/<run>/ and their tokens count.
+  writeJsonl(path.join(dir, SID, 'subagents', 'workflows', 'wf_1', 'agent-b1.jsonl'), assistant(clock, 2_500, 'w1', [{ type: 'text', text: 'reviewing' }], 'end_turn', { input_tokens: 700, output_tokens: 70, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } as any));
+  clock.advance(5_000);
+  const engine = engineFor(new ClaudeCodeAdapter(), home, clock);
+  let s = await only(engine);
+  assert.equal(s.status, 'working');
+  assert.deepEqual([s.activity?.label, s.activity?.detail], ['1 workflow', 'review-changes']);
+  assert.equal(s.tokens?.input, 10 + 10 + 700);
+
+  appendJsonl(file, [
+    { ...base(clock, 0), type: 'user', origin: { kind: 'task-notification' }, message: { role: 'user', content: '<task-notification>\n<task-id>w7k2</task-id>\n<task-type>local_workflow</task-type>\n<status>completed</status>\n<summary>Workflow "review-changes" completed</summary>\n</task-notification>' } },
+    ...assistant(clock, 2_000, 'c', [{ type: 'text', text: 'The review found two issues.' }], 'end_turn'),
+  ]);
+  clock.advance(5_000);
+  s = await only(engine);
+  assert.equal(s.status, 'idle');
+});
+
+test('Claude Code: the plugin counts background agents exactly, a stop from the task list too', async () => {
+  const home = tmpHome();
+  const clock = new Clock('2026-10-30T10:00:00.000Z');
+  const file = path.join(home, '.claude', 'projects', '-work-shop', `${SID}.jsonl`);
+  const launched = (agentId: string) => ({ isAsync: true, status: 'async_launched', agentId, description: `Task ${agentId}`, prompt: '…', outputFile: '' });
+  writeJsonl(file, [
+    { ...base(clock, 0), type: 'user', origin: { kind: 'human' }, message: { role: 'user', content: 'Split the migration in two' } },
+    ...assistant(clock, 1_000, 'a', [
+      { type: 'tool_use', id: 'tu_1', name: 'Agent', input: { description: 'Task a1', prompt: '…', run_in_background: true } },
+      { type: 'tool_use', id: 'tu_2', name: 'Agent', input: { description: 'Task a2', prompt: '…', run_in_background: true } },
+    ], 'tool_use'),
+    toolResult(clock, 2_000, 'tu_1', 'Async agent launched successfully.', launched('a1')),
+    toolResult(clock, 2_001, 'tu_2', 'Async agent launched successfully.', launched('a2')),
+    ...assistant(clock, 3_000, 'b', [{ type: 'text', text: 'Both halves are running.' }], 'end_turn'),
+  ]);
+  const beat = path.join(home, '.kvali', 'live', 'claude-code', `${SID}.mod.json`);
+  const write = (body: Record<string, unknown>) => writeText(beat, JSON.stringify({ v: 1, agent: 'claude-code', sessionId: SID, ...body }));
+  clock.advance(10_000);
+  write({ at: clock.t, phase: 'running', since: clock.t - 7_000, label: '2 background agents', background: 2 });
+  const engine = engineFor(new ClaudeCodeAdapter(), home, clock);
+  let s = await only(engine);
+  assert.equal(s.status, 'working');
+  assert.equal(s.pulse?.label, '2 background agents');
+
+  // Both stopped from Claude Code's task list: no notification, the plugin's count says so.
+  clock.advance(60_000);
+  write({ at: clock.t, phase: 'done', since: clock.t - 67_000, background: 0 });
+  s = await only(engine);
+  assert.equal(s.status, 'idle');
+  assert.equal(s.activity, undefined);
+});
