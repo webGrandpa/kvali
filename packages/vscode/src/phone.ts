@@ -28,7 +28,16 @@ export class PhoneSender {
   view(): PhoneView | undefined {
     const c = this.notifier.config;
     return c
-      ? { server: c.server, topic: c.topic, link: subscribeLink(c), events: c.events, details: c.details, doneAfterSec: c.doneAfterSec ?? DEFAULT_DONE_AFTER_SEC }
+      ? {
+          server: c.server,
+          topic: c.topic,
+          link: c.topic ? subscribeLink({ server: c.server, topic: c.topic }) : undefined,
+          telegram: c.telegram ? { bot: c.telegram.bot } : undefined,
+          discord: !!c.discord,
+          events: c.events,
+          details: c.details,
+          doneAfterSec: c.doneAfterSec ?? DEFAULT_DONE_AFTER_SEC,
+        }
       : undefined;
   }
 

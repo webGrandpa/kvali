@@ -6,23 +6,21 @@
  *   kvali --json               print one snapshot as JSON
  *   kvali hooks install|uninstall|status    manage Claude Code hooks
  *   kvali protocol [dir]       add the progress protocol to <dir>/AGENTS.md
- *   kvali phone                notifications on your phone (ntfy)
+ *   kvali phone                notifications on your phone (ntfy, Telegram, Discord)
  *   kvali watch                no dashboard: hooks and phone notifications only
+ *   kvali week                 the last seven days, to share
  */
+import { writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import {
-  AntigravityAdapter,
-  ClaudeCodeAdapter,
-  CodexAdapter,
   DEFAULT_HOOK_PORT,
   Engine,
-  GeminiCliAdapter,
   HookHub,
-  ProgressFileAdapter,
   STATUS_LABEL,
+  createDefaultAdapters,
   addGlobalPlanRule,
   addProgressProtocol,
   applySetup,
@@ -34,14 +32,23 @@ import {
   claudeSettingsPath,
   currentTask,
   defaultLiveDir,
+  fmtAbout,
   fmtAgo,
   fmtDuration,
+  fmtEta,
   fmtTokens,
   fmtUsd,
   groupByProject,
   installClaudeHooks,
   newPhoneConfig,
+  newTopic,
   PhoneNotifier,
+  telegramBot,
+  telegramFindChat,
+  discordCheck,
+  channelNames,
+  DEFAULT_NTFY_SERVER,
+  DEFAULT_PHONE_EVENTS,
   qrTerminal,
   readPhoneConfig,
   sendPush,
@@ -49,7 +56,15 @@ import {
   testPush,
   writePhoneConfig,
   pathWithin,
+  planEta,
   pluginRunsIn,
+  weekSnapshot,
+  weekStats,
+  weekRange,
+  weekShareText,
+  weekSvg,
+  weekdayShort,
+  fmtWork,
   progressOf,
   sessionTokens,
   todayUsage,
@@ -62,7 +77,7 @@ import {
   type Snapshot,
 } from '@kvali/core';
 
-const VERSION = '0.6.8';
+const VERSION = '0.7.0';
 
 interface Options {
   json: boolean;
@@ -83,6 +98,8 @@ interface Options {
   events: PhoneEvent[] | undefined;
   /** `--done-after <seconds>`: the shortest task whose end is worth a notification. */
   doneAfter: number | undefined;
+  /** `kvali week --svg [file]`: also write the card ('' for the default name). */
+  svg?: string;
 }
 
 function parse(argv: string[]): { cmd: string[]; opts: Options } {
@@ -169,6 +186,9 @@ function parse(argv: string[]): { cmd: string[]; opts: Options } {
         opts.doneAfter = Math.round(sec);
         break;
       }
+      case '--svg':
+        opts.svg = argv[i + 1] !== undefined && !argv[i + 1]!.startsWith('-') ? argv[++i] : '';
+        break;
       case '--version':
       case '-v':
         console.log(VERSION);
@@ -202,7 +222,10 @@ Usage
   kvali plan-rule             ask every installed agent to always keep a plan (global)
   kvali phone                 notifications on your phone through ntfy: shows a QR code, sends a test
   kvali phone test | off      send a test notification | stop phone notifications
+  kvali phone telegram [off]  notifications from a Telegram bot of your own (asks for its token)
+  kvali phone discord [off]   notifications in a Discord channel (asks for its webhook URL)
   kvali watch                 run without a dashboard: hooks and phone notifications (e.g. in the background)
+  kvali week [--svg [file]]   your agents' last seven days, a post to share them, and the card as SVG
 
 Options
   -p, --project <dir>         only sessions inside <dir>      --here   same, for the current directory
@@ -213,7 +236,7 @@ Options
   --no-hub                    do not listen for hook events (and send no phone notifications)
   --no-color
   kvali phone options: --server <url> (self-hosted ntfy)  --token <token>  --private (no project or step names)
-                              --events needs-you,done,steps,actions,error,stuck (what to hear about)  --done-after <seconds> (shortest task worth a notification; 0: every task)  --no-steps`;
+                              --events needs-you,done,steps,actions,error,stuck,limits (what to hear about)  --done-after <seconds> (shortest task worth a notification; 0: every task)  --no-steps`;
 
 function fail(msg: string): never {
   console.error(`kvali: ${msg}`);
@@ -291,6 +314,11 @@ function agentTag(s: AgentSession, c: ReturnType<typeof paint>): string {
     codex: c.magenta,
     'gemini-cli': c.blue,
     antigravity: c.green,
+    copilot: c.cyan,
+    cline: c.cyan,
+    'roo-code': c.magenta,
+    'kilo-code': c.yellow,
+    opencode: c.green,
   };
   return (colors[s.agent] ?? c.cyan)(s.agentLabel.padEnd(12).slice(0, 12));
 }
@@ -308,22 +336,22 @@ export function render(snap: Snapshot, opts: Options, width = process.stdout.col
     `${c.bold('kvali')} ${c.gray(`· ${sessions.length} session${sessions.length === 1 ? '' : 's'} · today ${fmtTokens(today.tokens)} tokens${today.priced ? ` · API value ${fmtUsd(today.costUsd)}` : ''}`)}`,
   );
 
-  const limits = new Map<string, AgentSession>();
-  for (const s of sessions) if (s.rateLimits?.length && !limits.has(s.agent)) limits.set(s.agent, s);
-  for (const s of limits.values()) {
-    const parts = s.rateLimits!.map((r) => {
+  for (const l of snap.limits ?? []) {
+    const parts = l.windows.map((r) => {
       const pct = Math.round(r.usedPercent);
-      const color = pct >= 90 ? c.red : pct >= 70 ? c.yellow : c.green;
-      const reset = r.resetsAt ? c.gray(` resets in ${fmtDuration(r.resetsAt - now)}`) : '';
-      return `${r.label} ${color(`${pct}%`)}${reset}`;
+      const color = pct >= 90 || r.runsOutAt !== undefined ? c.red : pct >= 70 ? c.yellow : c.green;
+      const out = r.runsOutAt !== undefined ? c.red(r.runsOutAt <= now ? ' used up' : ` runs out in ${fmtAbout(r.runsOutAt - now)}`) : '';
+      const reset = r.resetsAt && r.resetsAt > now ? c.gray(` resets in ${fmtDuration(r.resetsAt - now)}`) : '';
+      return `${r.label} ${color(`${pct}%`)}${out}${reset}`;
     });
-    lines.push(`${c.gray('limits')}  ${agentTag(s, c).trim()}  ${parts.join(c.gray('  ·  '))}`);
+    const tag = agentTag({ agent: l.agent, agentLabel: l.agentLabel } as AgentSession, c).trim();
+    lines.push(`${c.gray('limits')}  ${tag}  ${parts.join(c.gray('  ·  '))}`);
   }
 
   if (sessions.length === 0) {
     lines.push('', c.gray(`No agent sessions in the last ${opts.windowHours}h${opts.project ? ` under ${opts.project}` : ''}.`));
-    lines.push(c.gray('Start Claude Code, Codex, Gemini CLI or Antigravity and sessions appear here automatically.'));
-    lines.push(c.gray('Other agents (Cursor, Copilot, …): run `kvali protocol` in your repo to add the AGENTS.md progress protocol.'));
+    lines.push(c.gray('Start Claude Code, Codex, Gemini CLI, Antigravity, Copilot, Cline, Roo Code, Kilo Code or OpenCode and sessions appear here automatically.'));
+    lines.push(c.gray('Other agents (Cursor, Windsurf, Aider, …): run `kvali protocol` in your repo to add the AGENTS.md progress protocol.'));
   }
 
   const barWidth = 14;
@@ -346,6 +374,9 @@ export function render(snap: Snapshot, opts: Options, width = process.stdout.col
       const doing: string[] = [];
       if (s.status === 'waiting' || s.status === 'error') doing.push((s.status === 'waiting' ? c.yellow : c.red)(s.statusDetail ?? STATUS_LABEL[s.status]));
       else if (step) doing.push(`↳ ${step.activeTitle ?? step.title}`);
+      const eta = s.status === 'working' ? planEta(s, now) : undefined;
+      if (eta !== undefined) doing.push(c.cyan(fmtEta(eta)));
+      if (s.loop) doing.push(c.red(`⟳ going in circles: ${s.loop.detail ?? s.loop.label} failed ${s.loop.count}×`));
       if (s.status === 'working' && s.activity) {
         const a = s.activity;
         doing.push(c.gray(`${a.label}${a.detail ? `: ${a.detail}` : ''} · ${fmtDuration(now - a.startedAt)}`));
@@ -376,21 +407,50 @@ function makeEngine(opts: Options): Engine {
     activeWindowMs: opts.windowHours * 3_600_000,
     workspaceRoots: opts.project ? [opts.project] : [process.cwd()],
     liveDir: defaultLiveDir(opts.home),
-    adapters: [
-      new ClaudeCodeAdapter(),
-      new CodexAdapter(),
-      new GeminiCliAdapter(),
-      new AntigravityAdapter(opts.brainDirs),
-      new ProgressFileAdapter(),
-    ],
+    adapters: createDefaultAdapters({ extraAntigravityBrainDirs: opts.brainDirs }),
   });
+}
+
+/** `kvali week`: the last seven days in numbers, a post to share them, and with `--svg` the card. */
+async function week(opts: Options, svgFile: string | undefined): Promise<void> {
+  const c = paint(opts.color);
+  const snap = await weekSnapshot({
+    home: opts.home,
+    liveDir: defaultLiveDir(opts.home),
+    adapters: createDefaultAdapters({ extraAntigravityBrainDirs: opts.brainDirs }),
+    workspaceRoots: [process.cwd()],
+  });
+  const w = weekStats(snap.sessions, Date.now());
+  if (opts.json) {
+    console.log(JSON.stringify(w, null, 2));
+    return;
+  }
+  const max = Math.max(1, ...w.days.map((d) => d.activeMs));
+  console.log(
+    [
+      `${c.bold('kvali week')} ${c.gray(`· ${weekRange(w)}`)}`,
+      '',
+      `  ${c.bold(fmtWork(w.activeMs))} of agent work · ${w.tasksDone} tasks done · ${fmtTokens(w.tokens)} tokens${w.priced && w.costUsd ? ` · API value ${fmtUsd(w.costUsd)}` : ''}`,
+      `  ${w.sessions} session${w.sessions === 1 ? '' : 's'} in ${w.projects} project${w.projects === 1 ? '' : 's'}${w.agents.length ? ` · ${w.agents.join(', ')}` : ''}`,
+      '',
+      ...w.days.map((d) => `  ${weekdayShort(d.day)}  ${c.cyan('█'.repeat(Math.round((d.activeMs / max) * 30)) || c.gray('·'))} ${c.gray(d.activeMs ? fmtWork(d.activeMs) : '')}`),
+      '',
+      c.gray('  To share:'),
+      ...weekShareText(w).split('\n').map((l) => `  ${l}`),
+    ].join('\n'),
+  );
+  if (svgFile !== undefined) {
+    const file = path.resolve(svgFile || `kvali-week-${w.days[w.days.length - 1]!.day}.svg`);
+    await writeFile(file, weekSvg(w));
+    console.log(`\n  Card: ${file} ${c.gray('(1200×630 SVG; open it in a browser to save as PNG)')}`);
+  }
 }
 
 async function hooks(sub: string | undefined, opts: Options): Promise<void> {
   const file = claudeSettingsPath(opts.home);
   if (sub === 'install') {
-    const { backup } = await installClaudeHooks(file, opts.port);
-    console.log(`Installed Kvali hooks in ${file}${backup ? ` (backup: ${backup})` : ''}.`);
+    const { backup, changed } = await installClaudeHooks(file, opts.port);
+    console.log(changed ? `Installed Kvali hooks in ${file}${backup ? ` (backup: ${backup})` : ''}.` : `Kvali hooks are already installed in ${file}.`);
     console.log('Keep `kvali` or the Kvali editor extension running to receive events.');
   } else if (sub === 'uninstall') {
     const r = await uninstallClaudeHooks(file);
@@ -426,16 +486,85 @@ function phoneEventsText(cfg: PhoneConfig): string {
     steps: 'each finished step (silent)',
     actions: 'every action, live (silent)',
     error: 'errors',
-    stuck: 'an agent gone silent',
+    stuck: 'an agent gone silent or going in circles',
+    limits: 'a plan limit running out',
   };
   return cfg.events.length ? PHONE_EVENTS.filter((e) => cfg.events.includes(e)).map((e) => words[e]).join(', ') : 'nothing (no event chosen)';
 }
 
-async function phone(sub: string | undefined, opts: Options): Promise<void> {
+/** Asks for a secret on the terminal without echoing it, so it lands in no shell history. */
+async function askSecret(question: string): Promise<string> {
+  if (!process.stdin.isTTY) fail('this step asks for a token: run it in a terminal');
+  process.stdout.write(question);
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  process.stdin.setEncoding('utf8');
+  return new Promise((resolve) => {
+    let text = '';
+    const onData = (ch: string) => {
+      for (const k of ch) {
+        if (k === '\r' || k === '\n') {
+          process.stdin.setRawMode(false);
+          process.stdin.pause();
+          process.stdin.off('data', onData);
+          process.stdout.write('\n');
+          resolve(text.trim());
+          return;
+        }
+        if (k === '\u0003') {
+          process.stdout.write('\n');
+          process.exit(130);
+        }
+        if (k === '\u007f' || k === '\b') text = text.slice(0, -1);
+        else text += k;
+      }
+    };
+    process.stdin.on('data', onData);
+  });
+}
+
+/** `kvali phone telegram` and `kvali phone discord`: a bot of one's own, or a channel's webhook. */
+async function phoneChannel(which: 'telegram' | 'discord', off: boolean, opts: Options): Promise<void> {
   const c = paint(opts.color);
+  const cfg = await readPhoneConfig(opts.home);
+  if (off) {
+    if (!cfg?.[which]) return void console.log(`${which === 'telegram' ? 'Telegram' : 'Discord'} is not set up.`);
+    const rest: PhoneConfig = { ...cfg, [which]: undefined };
+    await writePhoneConfig(opts.home, rest.topic || rest.telegram || rest.discord ? rest : undefined);
+    console.log(which === 'telegram' ? 'Kvali no longer writes to Telegram.' : 'Kvali no longer posts to Discord.');
+    return;
+  }
+  const base: PhoneConfig = cfg ?? { server: DEFAULT_NTFY_SERVER, events: [...DEFAULT_PHONE_EVENTS], details: true, doneAfterSec: DEFAULT_DONE_AFTER_SEC };
+  let only: Partial<PhoneConfig>;
+  if (which === 'telegram') {
+    console.log([c.bold('Kvali → Telegram'), '', '  1. In Telegram, open @BotFather, send /newbot and choose a name.', '  2. Paste the token it gives you (it stays on this computer):'].join('\n'));
+    const token = await askSecret('  Token: ');
+    const me = await telegramBot(token);
+    if (!me.ok) fail(`could not use this bot: ${me.error}`);
+    console.log(`  3. Now send any message to @${me.username} (https://t.me/${me.username}). Waiting up to 3 minutes…`);
+    const chatId = await telegramFindChat(token, 180_000);
+    if (!chatId) fail(`no message reached @${me.username}; run \`kvali phone telegram\` again and write to the bot while Kvali waits`);
+    only = { telegram: { token, chatId, bot: me.username } };
+  } else {
+    console.log([c.bold('Kvali → Discord'), '', '  In Discord: Edit Channel → Integrations → Webhooks → New Webhook → Copy Webhook URL.', '  Paste it here (it stays on this computer):'].join('\n'));
+    const webhook = await askSecret('  Webhook URL: ');
+    const check = await discordCheck(webhook);
+    if (!check.ok) fail(`could not use this webhook: ${check.error}`);
+    only = { discord: { webhook } };
+  }
+  const next = { ...base, ...only };
+  await writePhoneConfig(opts.home, next);
+  const r = await sendPush({ ...next, topic: undefined, telegram: undefined, discord: undefined, ...only }, testPush());
+  console.log(r.ok ? c.green(`  Connected (${channelNames(next)}). Sent a test notification.`) : c.yellow(`  Saved, but the test was not sent: ${r.error}`));
+  console.log(c.gray(`  Stop: kvali phone ${which} off`));
+}
+
+async function phone(sub: string | undefined, opts: Options, arg?: string): Promise<void> {
+  const c = paint(opts.color);
+  if (sub === 'telegram' || sub === 'discord') return phoneChannel(sub, arg === 'off', opts);
   if (sub === 'off') {
     await writePhoneConfig(opts.home, undefined);
-    console.log('Phone notifications are off. You can remove the Kvali topic from the ntfy app too.');
+    console.log('Phone notifications are off (ntfy, Telegram and Discord). You can remove the Kvali topic from the ntfy app too.');
     return;
   }
   let cfg = await readPhoneConfig(opts.home);
@@ -446,9 +575,10 @@ async function phone(sub: string | undefined, opts: Options): Promise<void> {
     if (!r.ok) process.exitCode = 1;
     return;
   }
-  if (sub) fail(`unknown phone command "${sub}" (phone, phone test, phone off)`);
-  const fresh = !cfg;
-  cfg ??= newPhoneConfig(opts.server);
+  if (sub) fail(`unknown phone command "${sub}" (phone, phone test, phone off, phone telegram, phone discord)`);
+  const fresh = !cfg?.topic;
+  cfg = cfg ? { ...cfg, topic: cfg.topic ?? newTopic() } : newPhoneConfig(opts.server);
+  const topic = cfg.topic!;
   if (opts.server) cfg.server = opts.server.replace(/\/+$/, '');
   if (opts.token) cfg.token = opts.token;
   if (opts.private) cfg.details = false;
@@ -465,9 +595,9 @@ async function phone(sub: string | undefined, opts: Options): Promise<void> {
       '  1. Install the free ntfy app (iPhone or Android): https://ntfy.sh',
       `  2. Android: scan this code. iPhone: in ntfy tap + and enter the topic${self ? ` (server ${cfg.server})` : ''}.`,
       '',
-      qrTerminal(subscribeLink(cfg), opts.color),
+      qrTerminal(subscribeLink({ server: cfg.server, topic }), opts.color),
       '',
-      `  Topic: ${c.bold(cfg.topic)}${fresh ? c.gray('  (new; keep it to yourself: the name is the key)') : ''}`,
+      `  Topic: ${c.bold(topic)}${fresh ? c.gray('  (new; keep it to yourself: the name is the key)') : ''}`,
       '',
     ].join('\n'),
   );
@@ -477,9 +607,10 @@ async function phone(sub: string | undefined, opts: Options): Promise<void> {
     [
       '',
       `  You will hear about: ${phoneEventsText(cfg)}.`,
-      '  Choose with --events needs-you,done,steps,actions,error,stuck and --done-after <seconds>.',
+      '  Choose with --events needs-you,done,steps,actions,error,stuck,limits and --done-after <seconds>.',
       '  They are sent while Kvali runs: the editor extension, `kvali`, or `kvali watch` in the background.',
       "  Kvali's Claude Code plugin sends them for its own sessions by itself.",
+      `  ${c.gray('Also on Telegram or Discord: kvali phone telegram · kvali phone discord')}`,
       `  ${c.gray('Test: kvali phone test · Stop: kvali phone off')}`,
     ].join('\n'),
   );
@@ -506,8 +637,9 @@ async function main(): Promise<void> {
     console.log(['Kvali is on:', ...lines, 'Undo with `kvali setup off`.'].join('\n'));
     return;
   }
-  if (cmd[0] === 'phone') return phone(cmd[1], opts);
+  if (cmd[0] === 'phone') return phone(cmd[1], opts, cmd[2]);
   if (cmd[0] === 'watch') return watch(opts);
+  if (cmd[0] === 'week') return week(opts, opts.svg);
   if (cmd[0] === 'plan-rule') {
     for (const r of await addGlobalPlanRule(opts.home, process.env)) console.log(`${r.agent}: ${r.result} (${r.file})`);
     return;
@@ -594,7 +726,7 @@ async function watch(opts: Options): Promise<void> {
   startPhone(engine, hub, opts.home, say);
   engine.start();
   const cfg = await readPhoneConfig(opts.home);
-  say(cfg ? `watching agents; phone notifications go to ${cfg.topic}` : 'watching agents; phone notifications are not set up (run `kvali phone`)');
+  say(cfg ? `watching agents; phone notifications go to ${channelNames(cfg)}` : 'watching agents; phone notifications are not set up (run `kvali phone`)');
   const stop = () => {
     hub.dispose();
     engine.dispose();

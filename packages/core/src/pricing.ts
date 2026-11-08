@@ -81,12 +81,14 @@ export const ANTHROPIC_PRICES: Record<string, ModelPrice> = {
  * Normalizes Anthropic model ids from the API, Bedrock and Vertex into a pricing key:
  *   claude-opus-4-5-20251101 → opus-4-5      claude-3-5-haiku-20241022 → haiku-3-5
  *   us.anthropic.claude-sonnet-4-6-v1:0 → sonnet-4-6      claude-opus-5-5[1m] → opus-5-5
+ *   anthropic/claude-sonnet-4.5 → sonnet-4-5
  */
 export function anthropicModelKey(model: string): string | undefined {
   let m = model.toLowerCase();
   const at = m.indexOf('claude');
   if (at === -1) return undefined;
-  m = m.slice(at).replace(/\[[^\]]*\]/g, '').replace(/@.*$/, '');
+  // Some tools write versions with a dot (`claude-sonnet-4.5`, `claude-opus-4.8-fast`).
+  m = m.slice(at).replace(/\[[^\]]*\]/g, '').replace(/@.*$/, '').replace(/(\d)\.(\d)/g, '$1-$2');
   let r = /^claude-(fable|mythos|opus|sonnet|haiku)-(\d+)(?:-(\d{1,2}))?(?=-|$|:)/.exec(m);
   if (r) return `${r[1]}-${r[2]}${r[3] ? `-${r[3]}` : ''}`;
   r = /^claude-(\d+)(?:-(\d{1,2}))?-(opus|sonnet|haiku)/.exec(m);

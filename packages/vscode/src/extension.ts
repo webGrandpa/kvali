@@ -17,8 +17,10 @@ import {
   detectedLabels,
   installClaudeHooks,
   newPhoneConfig,
+  newTopic,
   pathWithin,
   pluginRunsIn,
+  projectName,
   progressOf,
   pruneLiveDir,
   readPhoneConfig,
@@ -27,12 +29,23 @@ import {
   setKvaliOption,
   sendPush,
   setupChanges,
+  telegramBot,
+  telegramFindChat,
+  discordCheck,
+  channelNames,
   testPush,
   uninstallClaudeHooks,
+  weekSnapshot,
+  weekStats,
   writePhoneConfig,
   DEFAULT_DONE_AFTER_SEC,
+  DEFAULT_NTFY_SERVER,
+  DEFAULT_PHONE_EVENTS,
+  DISCORD_WEBHOOK_RE,
   DONE_AFTER_CHOICES,
   PHONE_EVENTS,
+  TELEGRAM_TOKEN_RE,
+  type PhoneConfig,
   type AgentSession,
   type DetectedAgents,
   type HookStatus,
@@ -44,7 +57,9 @@ import type { FromWebview, SetupState } from './messages.ts';
 import { Notifier } from './notifier.ts';
 import { AgentsView } from './panel.ts';
 import { PhoneSender } from './phone.ts';
+import { SharePanel } from './share.ts';
 import { StatusBar } from './statusbar.ts';
+import { goToAgent, jumpHere, type JumpDeps } from './jump.ts';
 import { WindowRegistry } from './windows.ts';
 
 const SAFE_ID = /^[A-Za-z0-9-]{8,80}$/;
@@ -55,6 +70,8 @@ const REPO = 'https://github.com/webGrandpa/kvali';
 export interface KvaliApi {
   getSnapshot(): Snapshot;
   onDidChangeSnapshot(listener: (s: Snapshot) => void): vscode.Disposable;
+  /** Takes the person to the session `key` (see "Go to agent"); says where it went. */
+  goToAgent(key: string): Promise<'terminal' | 'window' | 'panel' | 'none'>;
 }
 
 export function activate(context: vscode.ExtensionContext): KvaliApi {
@@ -76,6 +93,8 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
     (vscode.workspace.workspaceFolders ?? []).filter((f) => f.uri.scheme === 'file').map((f) => f.uri.fsPath);
   const inWorkspace = (s: AgentSession) => roots().some((r) => pathWithin(s.projectPath, r));
 
+  // The globalStorage of the editor Kvali runs in: Cline and Roo Code keep their tasks next to ours.
+  const editorStorage = [path.dirname(context.globalStorageUri.fsPath)];
   const engine = new Engine({
     home,
     liveDir,
@@ -86,10 +105,15 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
     pricing: new Pricing(config.pricing),
     disabled: config.disabled,
     extraAntigravityBrainDirs: config.brainDirs,
+    extraEditorStorageDirs: editorStorage,
     log: (m) => log.warn(m),
   });
 
-  const windows = new WindowRegistry(path.join(home, '.kvali', 'windows'), roots);
+  const windows = new WindowRegistry(path.join(home, '.kvali', 'windows'), roots, () => {
+    const f = vscode.workspace.workspaceFile;
+    return f?.scheme === 'file' ? f.fsPath : undefined;
+  });
+  const jumpDeps: JumpDeps = { windows, roots, log: (m) => log.info(m) };
 
   const hub = new HookHub({
     port: config.port,
@@ -122,6 +146,7 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
     // Notify for sessions in this workspace; the hook hub also covers sessions no open window claims.
     owns: (s) => inWorkspace(s) || (hub.isHub && !windows.claimedElsewhere(s.projectPath)),
     reveal: () => void vscode.commands.executeCommand('kvali.show'),
+    goTo: (s) => void goTo(s),
   });
 
   function pushState(): void {
@@ -151,6 +176,7 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
   engine.onSnapshot((snap) => {
     refreshStatusBar();
     notifier.update(snap);
+    void windows.checkFocus();
     const hadPhone = !!phone.config;
     void phone.update().then(() => {
       if (!!phone.config !== hadPhone) pushState();
@@ -161,8 +187,9 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
   /** One step to the phone: a private topic, the QR code in the panel, a test notification. */
   async function phoneSetup(): Promise<void> {
     let cfg = await readPhoneConfig(home);
-    if (!cfg) {
-      cfg = newPhoneConfig();
+    if (!cfg || !cfg.topic) {
+      // Telegram or Discord may be set up already: ntfy joins them.
+      cfg = cfg ? { ...cfg, topic: newTopic() } : newPhoneConfig();
       await writePhoneConfig(home, cfg);
       log.info(`Phone notifications set up on ${cfg.server} (topic ${cfg.topic})`);
     }
@@ -187,6 +214,113 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
       log.warn(`Phone test failed: ${r.error}`);
       void vscode.window.showWarningMessage(`Kvali could not send to your phone: ${r.error}. Check the network (a VPN, proxy or firewall may block ${new URL(cfg.server).host}).`);
     }
+  }
+
+  /** The phone setup to add a channel to: the existing one, or a new one without ntfy. */
+  async function phoneBase(): Promise<PhoneConfig> {
+    return (await readPhoneConfig(home)) ?? { server: DEFAULT_NTFY_SERVER, events: [...DEFAULT_PHONE_EVENTS], details: true, doneAfterSec: DEFAULT_DONE_AFTER_SEC };
+  }
+
+  async function channelSaved(cfg: PhoneConfig, only: Partial<PhoneConfig>, name: string): Promise<void> {
+    await writePhoneConfig(home, cfg);
+    await phone.reload(true);
+    phoneCard = true;
+    pushState();
+    // The test goes to the new channel alone.
+    const r = await sendPush({ ...cfg, topic: undefined, telegram: undefined, discord: undefined, ...only }, testPush());
+    if (r.ok) void vscode.window.showInformationMessage(`Kvali sends notifications to ${name} now (${channelNames(cfg)}). A test is on its way.`);
+    else void vscode.window.showWarningMessage(`Kvali saved ${name}, but the test was not sent: ${r.error}`);
+  }
+
+  /** Telegram: a bot of the person's own (from @BotFather) writes to them; it may only write to someone who wrote to it first. */
+  async function telegramSetup(): Promise<void> {
+    const raw = await vscode.window.showInputBox({
+      title: 'Kvali → Telegram',
+      prompt: 'In Telegram, open @BotFather, send /newbot, choose a name, and paste the token it gives you. It stays on this computer.',
+      placeHolder: '123456789:AAF…',
+      password: true,
+      ignoreFocusOut: true,
+      validateInput: (v) => (TELEGRAM_TOKEN_RE.test(v.trim()) ? undefined : 'A bot token looks like 123456789:AAF… (from @BotFather)'),
+    });
+    const token = raw?.trim();
+    if (!token) return;
+    const me = await telegramBot(token);
+    if (!me.ok) {
+      void vscode.window.showErrorMessage(`Kvali could not use this bot: ${me.error}.`);
+      return;
+    }
+    const link = `https://t.me/${me.username}`;
+    void vscode.window
+      .showInformationMessage(`Now send any message to @${me.username} in Telegram: a bot can write only to people who wrote to it first.`, 'Open Telegram')
+      .then((c) => c && vscode.env.openExternal(vscode.Uri.parse(link)));
+    const chatId = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `Kvali: waiting for your message to @${me.username}…`, cancellable: true },
+      (_progress, cancel) => {
+        const ac = new AbortController();
+        cancel.onCancellationRequested(() => ac.abort());
+        return telegramFindChat(token, 180_000, fetch, ac.signal);
+      },
+    );
+    if (!chatId) {
+      void vscode.window.showWarningMessage(`No message reached @${me.username}. Run "Kvali: Send Notifications to Telegram" again and write to the bot while Kvali waits.`);
+      return;
+    }
+    const telegram = { token, chatId, bot: me.username };
+    log.info(`Phone notifications: Telegram bot @${me.username} connected`);
+    await channelSaved({ ...(await phoneBase()), telegram }, { telegram }, `Telegram (@${me.username})`);
+  }
+
+  /** Discord: a webhook of one of the person's channels. */
+  async function discordSetup(): Promise<void> {
+    const raw = await vscode.window.showInputBox({
+      title: 'Kvali → Discord',
+      prompt: 'In Discord: Edit Channel → Integrations → Webhooks → New Webhook → Copy Webhook URL, and paste it here. It stays on this computer.',
+      placeHolder: 'https://discord.com/api/webhooks/…',
+      password: true,
+      ignoreFocusOut: true,
+      validateInput: (v) => (DISCORD_WEBHOOK_RE.test(v.trim()) ? undefined : 'A webhook URL looks like https://discord.com/api/webhooks/…'),
+    });
+    const webhook = raw?.trim();
+    if (!webhook) return;
+    const check = await discordCheck(webhook);
+    if (!check.ok) {
+      void vscode.window.showErrorMessage(`Kvali could not use this webhook: ${check.error}.`);
+      return;
+    }
+    log.info('Phone notifications: Discord webhook connected');
+    await channelSaved({ ...(await phoneBase()), discord: { webhook } }, { discord: { webhook } }, 'Discord');
+  }
+
+  /** "Share My Week": reads every session of the last seven days, then shows the card. */
+  async function shareWeek(): Promise<void> {
+    const snap = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'Kvali: counting this week’s agent work…' },
+      () =>
+        weekSnapshot({
+          home,
+          liveDir,
+          pricing: new Pricing(config.pricing),
+          disabled: config.disabled,
+          workspaceRoots: roots(),
+          extraAntigravityBrainDirs: config.brainDirs,
+          extraEditorStorageDirs: editorStorage,
+          log: (m) => log.warn(m),
+        }),
+    );
+    SharePanel.show(context.extensionUri, weekStats(snap.sessions, Date.now()));
+  }
+
+  /** Removes one channel; with none left, phone notifications are off. */
+  async function channelOff(which: 'telegram' | 'discord'): Promise<void> {
+    const cfg = await readPhoneConfig(home);
+    if (!cfg?.[which]) return;
+    const rest: PhoneConfig = { ...cfg, [which]: undefined };
+    await writePhoneConfig(home, rest.topic || rest.telegram || rest.discord ? rest : undefined);
+    await phone.reload(true);
+    pushState();
+    void vscode.window.showInformationMessage(
+      which === 'telegram' ? 'Kvali no longer writes to Telegram. You can delete the bot with @BotFather (/deletebot).' : 'Kvali no longer posts to Discord. You can delete the webhook in the channel settings.',
+    );
   }
 
   async function refreshHookStatus(): Promise<void> {
@@ -273,6 +407,70 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
     return engine.snapshot.sessions.find((s) => s.key === key);
   }
 
+  /** "Go to agent": the session's terminal, the window that has its project, or its agent's panel. */
+  async function goTo(s: AgentSession): Promise<void> {
+    const result = await goToAgent(s, jumpDeps);
+    log.info(`Go to agent: ${s.agent} ${s.id} → ${result}`);
+    if (result !== 'none') return;
+    const transcript = s.sources[0] && !/\.db$/i.test(s.sources[0]) ? 'Open transcript' : undefined;
+    const resumable = canResume(s) ? 'Resume here' : undefined;
+    const openProject = s.projectPath && !roots().some((r) => pathWithin(s.projectPath, r)) ? 'Open project' : undefined;
+    const where = s.host === 'app' ? 'It runs in another app.' : 'It may run in another terminal app or window.';
+    const choice = await vscode.window.showInformationMessage(
+      `Kvali could not find where this ${s.agentLabel} session runs. ${where}`,
+      ...[resumable, openProject, transcript].filter((x): x is string => !!x),
+    );
+    if (choice === 'Open transcript') await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(s.sources[0]!));
+    else if (choice === 'Resume here') resume(s);
+    else if (choice === 'Open project') await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(s.projectPath!), { forceNewWindow: true });
+  }
+
+  function canResume(s: AgentSession): boolean {
+    return (s.agent === 'claude-code' || s.agent === 'codex') && SAFE_ID.test(s.id) && s.status !== 'working' && s.status !== 'waiting';
+  }
+
+  function resume(s: AgentSession): void {
+    if (!SAFE_ID.test(s.id)) return;
+    const cmd = s.agent === 'claude-code' ? `claude --resume ${s.id}` : s.agent === 'codex' ? `codex resume ${s.id}` : undefined;
+    if (!cmd) return;
+    const term = vscode.window.createTerminal({ name: `${s.agentLabel}: ${s.title.slice(0, 30)}`, cwd: s.cwd ?? s.projectPath });
+    term.show();
+    term.sendText(cmd);
+  }
+
+  const STATUS_ICON: Record<AgentSession['status'], string> = {
+    waiting: '$(bell-dot)',
+    error: '$(error)',
+    working: '$(sync)',
+    stale: '$(clock)',
+    idle: '$(circle-outline)',
+    done: '$(pass)',
+  };
+
+  /** "Kvali: Go to Agent…": the live sessions, the ones that need you first. */
+  async function pickAndGoTo(): Promise<void> {
+    const order: Record<string, number> = { waiting: 0, error: 1, working: 2, stale: 3, idle: 4, done: 5 };
+    const live = engine.snapshot.sessions
+      .filter((s) => s.agent !== 'progress-file' && s.agent !== 'antigravity')
+      .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || b.updatedAt - a.updatedAt)
+      .slice(0, 30);
+    if (!live.length) {
+      void vscode.window.showInformationMessage('Kvali: no agent sessions to go to.');
+      return;
+    }
+    const item = await vscode.window.showQuickPick(
+      live.map((s) => ({
+        label: `${STATUS_ICON[s.status]} ${s.title}`,
+        description: `${s.agentLabel} · ${projectName(s.projectPath)}`,
+        detail: s.statusDetail,
+        key: s.key,
+      })),
+      { placeHolder: 'Go to which agent?', matchOnDescription: true },
+    );
+    const s = item && findSession(item.key);
+    if (s) await goTo(s);
+  }
+
   async function reportProblem(): Promise<void> {
     const snap = engine.snapshot;
     const version = String(context.extension.packageJSON.version ?? '?');
@@ -332,12 +530,12 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
       }
       case 'resume': {
         const s = findSession(m.key);
-        if (!s || !SAFE_ID.test(s.id)) return;
-        const cmd = s.agent === 'claude-code' ? `claude --resume ${s.id}` : s.agent === 'codex' ? `codex resume ${s.id}` : undefined;
-        if (!cmd) return;
-        const term = vscode.window.createTerminal({ name: `${s.agentLabel}: ${s.title.slice(0, 30)}`, cwd: s.cwd ?? s.projectPath });
-        term.show();
-        term.sendText(cmd);
+        if (s) resume(s);
+        return;
+      }
+      case 'goto': {
+        const s = findSession(m.key);
+        if (s) await goTo(s);
         return;
       }
       case 'command':
@@ -395,14 +593,20 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
       await phone.reload(true);
       phoneCard = false;
       pushState();
-      void vscode.window.showInformationMessage('Phone notifications are off. You can remove the Kvali topic from the ntfy app too.');
+      void vscode.window.showInformationMessage('Phone notifications are off (ntfy, Telegram and Discord). You can remove the Kvali topic from the ntfy app too.');
     }),
+    vscode.commands.registerCommand('kvali.shareWeek', () => shareWeek()),
+    vscode.commands.registerCommand('kvali.goToAgent', () => pickAndGoTo()),
+    vscode.commands.registerCommand('kvali.telegramSetup', () => telegramSetup()),
+    vscode.commands.registerCommand('kvali.discordSetup', () => discordSetup()),
+    vscode.commands.registerCommand('kvali.telegramOff', () => channelOff('telegram')),
+    vscode.commands.registerCommand('kvali.discordOff', () => channelOff('discord')),
 
     vscode.commands.registerCommand('kvali.setup', async () => {
       detected = await detectAgents(home, process.env);
       const changes = setupChanges(detected);
       if (!changes.length) {
-        void vscode.window.showWarningMessage('Kvali did not find Claude Code, Codex, Gemini CLI or Antigravity on this machine.');
+        void vscode.window.showWarningMessage('Kvali found no agent it can set up here (Claude Code, Codex, Gemini CLI or Antigravity). Copilot, Cline, Roo Code, Kilo Code and OpenCode need no setup.');
         return;
       }
       const ok = await vscode.window.showInformationMessage(
@@ -497,7 +701,7 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
         disabled: config.disabled,
       });
       if (JSON.stringify(before.brainDirs) !== JSON.stringify(config.brainDirs)) {
-        engine.setAdapters(createDefaultAdapters({ extraAntigravityBrainDirs: config.brainDirs }));
+        engine.setAdapters(createDefaultAdapters({ extraAntigravityBrainDirs: config.brainDirs, extraEditorStorageDirs: editorStorage }));
       }
       if (before.port !== config.port) {
         void vscode.window.showInformationMessage('Kvali: reload the window to use the new hook port.');
@@ -519,6 +723,11 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
   context.subscriptions.push({ dispose: () => clearInterval(clock) });
 
   windows.start();
+  // Another window asks this one to take the person to a session it has open.
+  windows.listen((key) => {
+    const s = findSession(key);
+    if (s) void jumpHere(s, jumpDeps).then((r) => log.info(`Go to agent (asked by another window): ${s.agent} ${s.id} → ${r}`));
+  });
   hub.start();
   engine.start();
   phone.start();
@@ -529,6 +738,10 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
   return {
     getSnapshot: () => engine.snapshot,
     onDidChangeSnapshot: (listener) => new vscode.Disposable(engine.onSnapshot(listener)),
+    goToAgent: async (key) => {
+      const s = findSession(key);
+      return s ? goToAgent(s, jumpDeps) : 'none';
+    },
   };
 }
 

@@ -8,6 +8,8 @@ export interface NotifierDeps {
   /** Whether this window should notify about `s` (avoids duplicates across windows). */
   owns(s: AgentSession): boolean;
   reveal(): void;
+  /** Takes the person to the session's terminal or panel. */
+  goTo(s: AgentSession): void;
 }
 
 const FINISH_DEBOUNCE_MS = 2_500;
@@ -23,6 +25,8 @@ export class Notifier {
   private readonly waiting = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly waitedAt = new Map<string, number>();
   private readonly latest = new Map<string, AgentSession>();
+  /** The loop (its start) each session was last warned about. */
+  private readonly loops = new Map<string, number>();
   private readonly startedAt = Date.now();
   private readonly deps: NotifierDeps;
 
@@ -40,6 +44,11 @@ export class Notifier {
       if (s.status === 'working' || s.status === 'waiting') this.cancel(s.key);
       if (s.status !== 'waiting') this.cancelWaiting(s.key);
 
+      if (s.loop && this.loops.get(s.key) !== s.loop.since) {
+        this.loops.set(s.key, s.loop.since);
+        this.fire('loop', s);
+      }
+
       if (before === undefined) {
         // First sighting (e.g. right after startup): only a fresh request for input is worth a ping.
         if (s.status === 'waiting' && s.updatedAt > this.startedAt) this.scheduleWaiting(s.key);
@@ -54,6 +63,7 @@ export class Notifier {
       if (seen.has(k)) continue;
       this.prev.delete(k);
       this.latest.delete(k);
+      this.loops.delete(k);
       this.cancelWaiting(k);
     }
   }
@@ -107,10 +117,10 @@ export class Notifier {
     );
   }
 
-  private fire(kind: 'finished' | 'waiting' | 'error', s: AgentSession): void {
+  private fire(kind: 'finished' | 'waiting' | 'error' | 'loop', s: AgentSession): void {
     const cfg = this.deps.config();
     if (kind === 'finished' && !cfg.notifyFinish) return;
-    if ((kind === 'waiting' || kind === 'error') && !cfg.notifyNeedsInput) return;
+    if (kind !== 'finished' && !cfg.notifyNeedsInput) return;
     if (!this.deps.owns(s)) return;
 
     const project = projectName(s.projectPath);
@@ -122,17 +132,28 @@ export class Notifier {
       text = `${s.agentLabel} finished in ${project}: ${s.title}${bits.length ? ` (${bits.join(', ')})` : ''}`;
     } else if (kind === 'waiting') {
       text = `${s.agentLabel} needs you in ${project}: ${s.statusDetail ?? 'waiting for input'} — ${s.title}`;
+    } else if (kind === 'loop') {
+      const l = s.loop!;
+      text = `${s.agentLabel} is going in circles in ${project}: “${l.detail ?? l.label}” failed ${l.count} times in a row${l.sameError ? ' with the same error' : ''}${l.tokens ? ` (${fmtTokens(l.tokens)} tokens)` : ''}. It may need a hint.`;
     } else {
       text = `${s.agentLabel} stopped with an error in ${project}: ${s.statusDetail ?? s.title}`;
     }
 
     const show = kind === 'finished' ? vscode.window.showInformationMessage : vscode.window.showWarningMessage;
-    void show(text, 'Show').then((choice) => {
-      if (choice) this.deps.reveal();
+    void show(text, 'Go to agent', 'Show').then((choice) => {
+      if (choice === 'Go to agent') this.deps.goTo(s);
+      else if (choice) this.deps.reveal();
     });
     if (cfg.notifySystem && !vscode.window.state.focused) {
-      const title = kind === 'finished' ? `✓ ${s.agentLabel} finished` : kind === 'waiting' ? `⚠ ${s.agentLabel} needs you` : `✕ ${s.agentLabel} error`;
-      osNotify(title, `${project} · ${kind === 'waiting' ? (s.statusDetail ?? s.title) : s.title}`);
+      const title =
+        kind === 'finished'
+          ? `✓ ${s.agentLabel} finished`
+          : kind === 'waiting'
+            ? `⚠ ${s.agentLabel} needs you`
+            : kind === 'loop'
+              ? `⟳ ${s.agentLabel} is going in circles`
+              : `✕ ${s.agentLabel} error`;
+      osNotify(title, `${project} · ${kind === 'waiting' ? (s.statusDetail ?? s.title) : kind === 'loop' ? `${s.loop!.detail ?? s.loop!.label} failed ${s.loop!.count}×` : s.title}`);
     }
   }
 }

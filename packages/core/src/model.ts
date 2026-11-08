@@ -6,11 +6,18 @@
  * model, so supporting a new agent never requires UI changes.
  */
 
+import type { AgentLimits } from './limits.ts';
+
 export type AgentId =
   | 'claude-code'
   | 'codex'
   | 'gemini-cli'
   | 'antigravity'
+  | 'cline'
+  | 'roo-code'
+  | 'kilo-code'
+  | 'opencode'
+  | 'copilot'
   | 'progress-file'
   | (string & {});
 
@@ -57,6 +64,10 @@ export interface RateLimitWindow {
   /** Epoch milliseconds. */
   resetsAt?: number;
   windowMinutes?: number;
+  /** When this reading was taken (epoch ms). */
+  at?: number;
+  /** At the pace of the last hour, when the window is used up, if that comes before it resets. */
+  runsOutAt?: number;
 }
 
 export interface Activity {
@@ -74,7 +85,13 @@ export interface Activity {
 export interface DailyUsage {
   tokens: number;
   costUsd: number;
+  /** How long the agent worked that day: the stretches between its own records, pauses left out. */
+  activeMs?: number;
+  /** Plan steps it finished that day. */
+  tasksDone?: number;
 }
+
+export type AgentHost = 'terminal' | 'editor' | 'app';
 
 export type PulsePhase = 'requesting' | 'thinking' | 'writing' | 'tool-input' | 'running' | 'needs-you' | 'stalled' | 'gone';
 
@@ -97,6 +114,14 @@ export interface AgentSession {
   model?: string;
   /** Version of the agent that wrote the session, when recorded (helps diagnose format changes). */
   agentVersion?: string;
+  /**
+   * Where the agent runs, as far as its files tell: `terminal` (a command-line agent), `editor`
+   * (an editor extension's panel) or `app` (another program, a script). Kvali uses it, and `pid`,
+   * to take you to the agent.
+   */
+  host?: AgentHost;
+  /** The agent's process, when its files name it. */
+  pid?: number;
   status: SessionStatus;
   /** Why the session is in its status, e.g. "Needs approval: Bash". */
   statusDetail?: string;
@@ -112,6 +137,11 @@ export interface AgentSession {
   current?: { taskId: string; startedAt: number; steps: number; typicalMs?: number };
   /** The agent's latest actions, newest first. */
   recent?: Activity[];
+  /**
+   * The agent goes in circles: the same action failed this many times in a row, with the same
+   * error each time (or many failures whatever their errors). `tokens`: spent since it began.
+   */
+  loop?: { label: string; detail?: string; count: number; sameError: boolean; since: number; tokens?: number };
   /** Set while the agent reports an API or connection problem, e.g. while retrying. */
   trouble?: { message: string; at: number; attempt?: number; maxAttempts?: number };
   /**
@@ -140,6 +170,8 @@ export interface AgentSession {
 export interface Snapshot {
   generatedAt: number;
   sessions: AgentSession[];
+  /** Plan limits, account-wide, per agent that reports them (Claude Code through Kvali's plugin, Codex). */
+  limits?: AgentLimits[];
   /** Per-agent errors, surfaced in the UI instead of crashing it. */
   errors: { agent: AgentId; message: string }[];
 }

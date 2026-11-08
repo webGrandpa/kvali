@@ -3,9 +3,13 @@ import path from 'node:path';
 import type { Adapter, AdapterContext } from './adapter.ts';
 import { AntigravityAdapter } from './adapters/antigravity.ts';
 import { ClaudeCodeAdapter } from './adapters/claude-code.ts';
+import { ClineAdapter, RooCodeAdapter } from './adapters/cline.ts';
 import { CodexAdapter } from './adapters/codex.ts';
+import { CopilotAdapter } from './adapters/copilot.ts';
 import { GeminiCliAdapter } from './adapters/gemini-cli.ts';
+import { KiloCodeAdapter, OpenCodeAdapter } from './adapters/opencode.ts';
 import { ProgressFileAdapter } from './adapters/progress-file.ts';
+import type { AgentLimits } from './limits.ts';
 import type { AgentId, AgentSession, Snapshot } from './model.ts';
 import { STATUS_PRIORITY } from './model.ts';
 import { pathWithin } from './format.ts';
@@ -26,6 +30,11 @@ export interface EngineOptions {
   pricing?: Pricing;
   liveDir?: string;
   extraAntigravityBrainDirs?: readonly string[];
+  /**
+   * More editor `globalStorage` folders to look for Cline and Roo Code in, besides the usual
+   * places: the extension passes its own editor's, which covers portable installs and remotes.
+   */
+  extraEditorStorageDirs?: readonly string[];
   log?: (message: string) => void;
 }
 
@@ -33,12 +42,17 @@ export function defaultLiveDir(home = os.homedir()): string {
   return path.join(home, '.kvali', 'live');
 }
 
-export function createDefaultAdapters(opts: Pick<EngineOptions, 'extraAntigravityBrainDirs'> = {}): Adapter[] {
+export function createDefaultAdapters(opts: Pick<EngineOptions, 'extraAntigravityBrainDirs' | 'extraEditorStorageDirs'> = {}): Adapter[] {
   return [
     new ClaudeCodeAdapter(),
     new CodexAdapter(),
     new GeminiCliAdapter(),
     new AntigravityAdapter(opts.extraAntigravityBrainDirs),
+    new CopilotAdapter(),
+    new ClineAdapter({ extraStorageDirs: opts.extraEditorStorageDirs }),
+    new RooCodeAdapter({ extraStorageDirs: opts.extraEditorStorageDirs }),
+    new OpenCodeAdapter(),
+    new KiloCodeAdapter(),
     new ProgressFileAdapter(),
   ];
 }
@@ -78,6 +92,19 @@ export function mergeProgressFiles(sessions: AgentSession[]): AgentSession[] {
 
 export function sortSessions(sessions: AgentSession[]): AgentSession[] {
   return sessions.sort((a, b) => STATUS_PRIORITY[a.status] - STATUS_PRIORITY[b.status] || b.updatedAt - a.updatedAt);
+}
+
+/**
+ * Every session of the last seven days, read once: what the weekly card counts. Slower than a
+ * live tick (it reads a week of transcripts), so it runs when asked.
+ */
+export async function weekSnapshot(opts: EngineOptions = {}): Promise<Snapshot> {
+  const engine = new Engine({ ...opts, adapters: opts.adapters ?? createDefaultAdapters(opts), activeWindowMs: 8 * 86_400_000, maxSessionsPerAgent: 5_000 });
+  try {
+    return await engine.tick();
+  } finally {
+    engine.dispose();
+  }
 }
 
 /**
@@ -174,10 +201,13 @@ export class Engine {
     try {
       const sessions: AgentSession[] = [];
       const errors: Snapshot['errors'] = [];
+      const limits: AgentLimits[] = [];
       for (const a of this.adapters) {
         if (this.disabled.has(a.id)) continue;
         try {
           sessions.push(...(await a.poll(this.ctx)));
+          const l = a.limits?.(this.ctx);
+          if (l?.windows.length) limits.push(l);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           errors.push({ agent: a.id, message });
@@ -186,10 +216,10 @@ export class Engine {
       }
       const merged = mergeProgressFiles(sessions);
       sortSessions(merged);
-      const signature = JSON.stringify([merged, errors]);
+      const signature = JSON.stringify([merged, errors, limits]);
       if (signature !== this.lastSignature) {
         this.lastSignature = signature;
-        this.current = { generatedAt: this.ctx.now(), sessions: merged, errors };
+        this.current = { generatedAt: this.ctx.now(), sessions: merged, errors, ...(limits.length ? { limits } : {}) };
         for (const l of this.listeners) {
           try {
             l(this.current);

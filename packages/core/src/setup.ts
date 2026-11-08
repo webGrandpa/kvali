@@ -106,8 +106,11 @@ export async function applySetup(home: string, env: Env = {}, port = DEFAULT_HOO
     const settings = claudeSettingsPath(home, env);
     const plugin = opts.pluginDir ? await setupClaudePlugin(home, env, opts) : { ok: false, note: undefined };
     if (plugin.ok) {
-      // The plugin reports everything the hooks did, and more: Kvali's hooks would only double it.
-      await uninstallClaudeHooks(settings).catch(() => undefined);
+      // Kvali's hooks stay beside the plugin: a Claude Code that cannot load the plugin (an older
+      // one in another editor, which reads the same settings) still reports through them and gets
+      // the plan request. Where the plugin runs, Kvali hears only the plugin: the hub's reply and
+      // the session's status give way to it, so nothing is reported twice.
+      await installClaudeHooks(settings, port);
       result.claude = 'plugin';
     } else {
       await installClaudeHooks(settings, port);

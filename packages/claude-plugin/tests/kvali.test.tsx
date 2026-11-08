@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { asksPerson } from '../hooks/model'
+import { asksPerson, fmtEta, planEtaMs } from '../hooks/model'
 
 const T0 = Date.UTC(2026, 9, 31, 10, 0, 0)
 const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
@@ -55,13 +55,17 @@ function engine(on: On, files: Record<string, File> = {}) {
     if (!f) throw missing(e.path)
     return { value: { kind: 'file' as const, size: f.text.length, mtimeMs: f.mtimeMs, isLink: false } }
   })
-  const pushes: { url: string; auth?: string; body: Record<string, unknown> }[] = []
+  const pushes: { url: string; method?: string; auth?: string; body: Record<string, any> }[] = []
   // ntfy's GET /v1/account answers how many messages are left today; a POST is a push.
   const allowance = { limits: { messages: 250 }, stats: { messages_remaining: 200 } }
+  // Telegram and Discord answer the id of the message they made, so the next update can edit it.
+  let messageId = 100
   on('http.fetch', (_, e) => {
-    if ((e.init?.method ?? 'GET') === 'GET') return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(allowance) } }
-    pushes.push({ url: e.url, auth: e.init?.headers?.Authorization, body: JSON.parse(e.init?.body ?? '{}') })
-    return { value: { status: 200, ok: true, headers: {}, text: '{}' } }
+    const method = e.init?.method ?? 'GET'
+    if (method === 'GET') return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(allowance) } }
+    pushes.push({ url: e.url, method, auth: e.init?.headers?.Authorization, body: JSON.parse(e.init?.body ?? '{}') })
+    const text = e.url.includes('api.telegram.org') ? JSON.stringify({ ok: true, result: { message_id: ++messageId } }) : e.url.includes('discord.com') ? JSON.stringify({ id: `m${++messageId}` }) : '{}'
+    return { value: { status: 200, ok: true, headers: {}, text } }
   })
   on('fs.write', (_, e) => {
     writes.push({ path: e.path, text: e.text })
@@ -93,7 +97,8 @@ test('a plan made with the Tasks tools: progress, the step on its clock, every s
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect((await ui.find({ type: 'Text', text: /\/3$/ }))?.text).toBe(' 1/3')
-    expect((await ui.find({ type: 'Text', text: /%$/ }))?.text).toBe(' · 33%')
+    // The first step took a minute, the second has run 30 s, one more after it.
+    expect((await ui.find({ type: 'Text', text: /%/ }))?.text).toBe(' · 33% · ~2m left')
     expect((await ui.find({ type: 'Text', text: /^Rewriting/ }))?.text).toBe('Rewriting the loaders')
     expect((await ui.find({ type: 'Text', text: /on this step/ }))?.text).toBe('30s on this step · usually ~1m 00s')
     expect((await ui.find({ type: 'Text', text: /Run the tests/ }))?.text).toBe('✓ Run the tests · pnpm test --run')
@@ -280,7 +285,7 @@ test('phone progress: one notification per turn, updated at most once a minute, 
   expect(pushes).toHaveLength(0)
   await clock.advance(2_000) // the count holds a moment, so the update names the next step
   expect(pushes).toHaveLength(1)
-  expect(pushes[0]!.body).toMatchObject({ title: 'Claude Code · w · 1/3', message: '███░░░░░░░ 33%\nNow: Rewriting the loaders', priority: 2 })
+  expect(pushes[0]!.body).toMatchObject({ title: 'Claude Code · w · 1/3', message: '███░░░░░░░ 33% · under a minute left\nNow: Rewriting the loaders', priority: 2 })
   const seq = pushes[0]!.body.sequence_id as string
   expect(seq).toMatch(/^kvali-s1-[a-z0-9]+$/)
 
@@ -290,8 +295,8 @@ test('phone progress: one notification per turn, updated at most once a minute, 
   expect(pushes).toHaveLength(1)
   await clock.advance(48_000) // the clock's refresh sends what waited
   expect(pushes.map(p => [p.body.title, p.body.message, p.body.sequence_id])).toEqual([
-    ['Claude Code · w · 1/3', '███░░░░░░░ 33%\nNow: Rewriting the loaders', seq],
-    ['Claude Code · w · 2/3', '███████░░░ 67%\nNext: Remove the old router', seq],
+    ['Claude Code · w · 1/3', '███░░░░░░░ 33% · under a minute left\nNow: Rewriting the loaders', seq],
+    ['Claude Code · w · 2/3', '███████░░░ 67% · under a minute left\nNext: Remove the old router', seq],
   ])
   await $.tool.call({ tool: 'TaskUpdate', taskId: '3', status: 'in_progress' })
 
@@ -433,6 +438,68 @@ test('automatic planning stays off when the config says so', async ($, on) => {
   await clock.advance(61_000)
   await $.prompt.submit({ text: 'Add a checkout page' })
   expect(seen).toEqual([undefined])
+})
+
+test('automatic planning keeps the task tools in the tool list, and leaves them where they were when it is off', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  mock.env(on, { HOME: '/home/u' })
+  const files: Record<string, File> = {}
+  engine(on, files)
+  on('tool.describe', (_, e) => ({ description: e.description, ...(e.isDeferred ? { isDeferred: true } : {}) }))
+  on('prompt.submit', (_, e) => ({ text: e.text, context: e.context }))
+  const provider = { plugin: 'engine', tier: 'core' } as const
+  await $.session.start({ cwd: '/w', surface: 'vscode', isInteractive: true })
+  for (const tool of ['TaskCreate', 'TaskUpdate']) {
+    const d = await $.tool.describe({ tool, description: `${tool} tool`, isDeferred: true, provider } as never)
+    expect(d.isDeferred).toBe(false)
+    expect(d.description).toBe(`${tool} tool`)
+  }
+  // Other tools keep the engine's placement.
+  expect((await $.tool.describe({ tool: 'WebFetch', description: 'fetch', isDeferred: true, provider } as never)).isDeferred).toBe(true)
+
+  files['/home/u/.kvali/config.json'] = { text: JSON.stringify({ autoPlan: false }), mtimeMs: T0 }
+  await clock.advance(61_000)
+  await $.prompt.submit({ text: 'next' })
+  expect((await $.tool.describe({ tool: 'TaskCreate', description: 'TaskCreate tool', isDeferred: true, provider } as never)).isDeferred).toBe(true)
+})
+
+test('a long turn with no plan is asked for one once, beside a tool result; a planned turn is not', async ($, on) => {
+  mock.clock(on, { now: T0 })
+  mock.env(on, { HOME: '/home/u' })
+  engine(on)
+  let nextId = 1
+  on('tool.call', (_, e) => (e.tool === 'TaskCreate' ? { result: { task: { id: String(nextId++), subject: e.subject } } } : { result: {} }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('prompt.submit', (_, e) => ({ text: e.text, context: e.context }))
+  await $.session.start({ cwd: '/w', surface: 'vscode', isInteractive: true })
+  // A turn nothing prompted (a resumed session, background agents reporting back).
+  await $.turn.start({ text: '', turnId: 't1' })
+  const asked: number[] = []
+  for (let i = 1; i <= 9; i++) {
+    const r = await $.tool.call({ tool: 'Bash', command: `step ${i}`, description: `Step ${i}` })
+    if (r.context?.some(c => c.startsWith('Progress tracking (Kvali): this work has no task list yet'))) asked.push(i)
+  }
+  expect(asked).toEqual([6])
+  await $.turn.complete({ answer: '', durationMs: 60_000, isAborted: false, turnId: 't1', reason: 'end_turn' } as never)
+
+  // A prompt that carried the plan request is not asked again in its turn.
+  await $.prompt.submit({ text: 'audit the repo' })
+  await $.turn.start({ text: 'audit the repo', turnId: 't0' })
+  for (let i = 1; i <= 8; i++) {
+    const r = await $.tool.call({ tool: 'Bash', command: `look ${i}`, description: `Look ${i}` })
+    expect(r.context ?? []).toEqual([])
+  }
+
+  // With a plan the next turn is not asked.
+  await $.turn.complete({ answer: '', durationMs: 60_000, isAborted: false, turnId: 't1', reason: 'end_turn' } as never)
+  await $.turn.start({ text: '', turnId: 't2' })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Audit the hooks', description: 'x' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'in_progress' })
+  for (let i = 1; i <= 8; i++) {
+    const r = await $.tool.call({ tool: 'Bash', command: `more ${i}`, description: `More ${i}` })
+    expect(r.context ?? []).toEqual([])
+  }
 })
 
 test('who answers an ask: the person, or the permission mode\'s decider', async () => {
@@ -581,4 +648,131 @@ test('agents in the background: an end nothing reports, a stop from the list, an
   expect(pushes[0]!.body).toMatchObject({ title: 'Claude Code finished · w' })
   expect(pushes[0]!.body.message).toMatch(/^Done in 4m 00s/)
   expect(lastBeat(writes)).toMatchObject({ phase: 'done', background: 0 })
+})
+
+test('time left: the plan\'s finished steps set the pace of the rest', async () => {
+  const now = T0
+  const task = (id: string, status: 'completed' | 'in_progress' | 'pending') => ({ id, title: `Step ${id}`, status })
+  const plan = {
+    tasks: [task('1', 'completed'), task('2', 'completed'), task('3', 'in_progress'), task('4', 'pending')],
+    step: { key: 'step 3', startedAt: now - 60_000, actions: 2 },
+    durations: [4 * 60_000, 6 * 60_000],
+    fileDurations: [],
+  }
+  expect(planEtaMs(plan, now)).toBe(4 * 60_000 + 5 * 60_000)
+  expect(fmtEta(planEtaMs(plan, now)!)).toBe('~9m left')
+  expect(planEtaMs({ ...plan, durations: [] }, now)).toBeUndefined()
+})
+
+test('plan limits: each measurement goes into the heartbeat with its recent readings, and the pane shows them', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  mock.env(on, { HOME: '/home/u' })
+  const { writes } = engine(on)
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+  const resetsAt = new Date(T0 + 3 * 3_600_000).toISOString()
+  const measure = (pct: number) =>
+    $.session.measure({
+      context: { window: 200_000, tokens: 50_000 },
+      rateLimits: [
+        { kind: 'five_hour', percentUsed: pct, resetsAt },
+        { kind: 'seven_day', percentUsed: 30 },
+      ],
+      changed: ['rateLimits'],
+    } as never)
+  await measure(40)
+  await clock.advance(15 * 60_000)
+  await measure(55)
+  await clock.advance(15 * 60_000)
+  await measure(70)
+  await clock.advance(100) // the heartbeat is written after the hook returns
+  const beat = JSON.parse(writes.filter(w => w.path.endsWith('.mod.json')).at(-1)!.text)
+  expect(beat.limits.at).toBe(T0 + 30 * 60_000)
+  expect(beat.limits.windows).toEqual([
+    { kind: 'five_hour', percentUsed: 70, resetsAt },
+    { kind: 'seven_day', percentUsed: 30 },
+  ])
+  expect(beat.limits.samples.five_hour).toEqual([
+    [T0, 40],
+    [T0 + 15 * 60_000, 55],
+    [T0 + 30 * 60_000, 70],
+  ])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // 1% a minute: used up 30 minutes from now, long before the reset in 2h 30m.
+  expect((await ui.find({ type: 'Text', text: /^Limits/ }))?.text).toBe('Limits: 5h 70% · runs out in ~30m · weekly 30%')
+  await ui.unmount()
+})
+
+test('going in circles: the same command failing the same way four times shows in the pane and reaches the phone once', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  mock.env(on, { HOME: '/home/u' })
+  const phone = { phone: { server: 'https://ntfy.example.com', topic: 'kvali-test', events: ['stuck'], details: true } }
+  const { pushes } = engine(on, { '/home/u/.kvali/config.json': { text: JSON.stringify(phone), mtimeMs: T0 } })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('tool.call', (_, e) =>
+    e.tool === 'Bash' ? { result: 'Exit code 1\nFAIL src/cart.test.ts > totals\nAssertionError: expected 3 to be 2', isError: true } : { result: {} },
+  )
+  await $.session.start({ cwd: '/w/shop', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'fix the cart totals', turnId: 't1' })
+  for (let i = 0; i < 4; i++) {
+    await $.tool.call({ tool: 'Edit', file_path: '/w/shop/src/cart.ts', old_string: 'a', new_string: 'b' } as never)
+    await $.tool.call({ tool: 'Bash', command: 'pnpm test', description: 'Run the tests' } as never)
+    await clock.advance(60_000)
+  }
+  await clock.advance(2_000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /^⟳/ }))?.text).toBe('⟳ Going in circles: “pnpm test” failed 4× in a row with the same error · 4m 02s')
+  await ui.unmount()
+  expect(pushes.map(p => [p.body.title, p.body.priority])).toEqual([['Claude Code is going in circles · w', 4]])
+  expect(pushes[0]!.body.message).toMatch(/^“pnpm test” failed 4 times in a row with the same error · for 3m 0\ds/)
+  await clock.advance(60_000)
+  expect(pushes).toHaveLength(1)
+})
+
+test('Telegram and Discord: a turn keeps one message on each, edited silently and replaced by its end', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  mock.env(on, { HOME: '/home/u' })
+  const TOKEN = '123456789:AAFabcdefghijklmnopqrstuvwxyz0123456'
+  const WEBHOOK = 'https://discord.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwxyz-ABCDEFGHIJ_0123456789'
+  const phone = { phone: { v: 3, telegram: { token: TOKEN, chatId: '42' }, discord: { webhook: WEBHOOK }, events: ['done', 'steps'], details: true } }
+  const { pushes } = engine(on, { '/home/u/.kvali/config.json': { text: JSON.stringify(phone), mtimeMs: T0 } })
+  let nextId = 1
+  on('tool.call', (_, e) => (e.tool === 'TaskCreate' ? { result: { task: { id: String(nextId++), subject: e.subject } } } : { result: {} }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  for (const subject of ['Map the routes', 'Rewrite the loaders', 'Remove the old router']) await $.tool.call({ tool: 'TaskCreate', subject, description: subject })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'in_progress' })
+  await clock.advance(20_000)
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', status: 'in_progress' })
+  await clock.advance(2_000)
+  const at = (u: string) => u.replace(TOKEN, '<token>').replace(WEBHOOK, '<webhook>')
+  expect(pushes.map(p => [p.method, at(p.url)])).toEqual([
+    ['POST', 'https://api.telegram.org/bot<token>/sendMessage'],
+    ['POST', '<webhook>?wait=true'],
+  ])
+  expect(pushes[0]!.body.disable_notification).toBe(true)
+  expect(pushes[0]!.body.text).toMatch(/^▶️ <b>Claude Code · w · 1\/3<\/b>/)
+  await clock.advance(60_000)
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', status: 'completed' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '3', status: 'in_progress' })
+  await clock.advance(2_000)
+  expect(pushes.slice(2).map(p => [p.method, at(p.url), p.body.message_id])).toEqual([
+    ['POST', 'https://api.telegram.org/bot<token>/editMessageText', 101],
+    ['PATCH', '<webhook>/messages/m102', undefined],
+  ])
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '3', status: 'completed' })
+  await $.turn.complete({ answer: '', durationMs: 150_000, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(1_000)
+  expect(pushes.slice(4).map(p => [p.method, at(p.url)])).toEqual([
+    ['POST', 'https://api.telegram.org/bot<token>/deleteMessage'],
+    ['POST', 'https://api.telegram.org/bot<token>/sendMessage'],
+    ['DELETE', '<webhook>/messages/m102'],
+    ['POST', '<webhook>?wait=true'],
+  ])
+  expect(pushes[5]!.body.text).toBe('✅ <b>Claude Code finished · w</b>\nDone in 2m 30s · 3/3 tasks')
+  expect(pushes[7]!.body.embeds[0]).toMatchObject({ title: '✅ Claude Code finished · w', color: 0x3fb950 })
 })

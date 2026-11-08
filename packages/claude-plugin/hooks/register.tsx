@@ -4,6 +4,8 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { KvAction, KvLive, KvPhase, KvPlan, KvTask } from '../types'
 import {
   ASKS_PERSON,
+  addLimitSamples,
+  currentLoop,
   asksPerson,
   EMPTY_PLAN,
   EMPTY_USAGE,
@@ -16,20 +18,34 @@ import {
   autoPlanEnabled,
   ntfyBody,
   parsePhoneConfig,
+  PUSH_COLOR,
+  discordBody,
+  telegramText,
   PLAN_CONTEXT,
+  PLAN_ASK_AFTER,
+  PLAN_REMINDER,
   wantsPlanContext,
   phonePush,
   barCells,
   contextPercent,
   describeTool,
   endAction,
+  fmtAbout,
   fmtDuration,
+  fmtEta,
+  fmtMinutes,
   fmtTokens,
   isActivePhase,
+  limitLabel,
+  limitRunsOut,
   liveLine,
+  loopKey,
+  noteCall,
   parseTaskFile,
+  planEtaMs,
   progress,
   projectSlug,
+  resultText,
   pushAction,
   scanTranscript,
   sortTasks,
@@ -39,7 +55,11 @@ import {
   typicalMs,
   messagesLeftOf,
   QUIET_RESERVE,
+  type LimitSamples,
+  type LimitWindow,
+  type LoopStreak,
   type PhoneCfg,
+  type PhonePush,
   type PushKind,
 } from './model'
 
@@ -131,6 +151,11 @@ type Runtime = {
   budgetLeft: number | undefined
   /** Ask Claude for a plan while there is none (`autoPlan` in ~/.kvali/config.json). */
   autoPlan: boolean
+  /** Tool calls of the main loop in this turn, and whether this turn was already asked for a plan. */
+  turnCalls: number
+  planAsked: boolean
+  /** The prompt just submitted carried the plan request: the turn it starts was asked. */
+  promptAsked: boolean
   /** The session's permission mode, as the last classic event carried it: who answers an ask. */
   mode: string | undefined
   /** Agents the main loop started in the background, at work until their run ends. */
@@ -142,6 +167,15 @@ type Runtime = {
    * for theirs and for the turn their reports start. `idleSince`: all done, and nothing woke it.
    */
   held: { startedAt: number; sequence?: string; followed: boolean; idleSince?: number } | undefined
+  /** The subscription's usage windows as the last API response reported them, and their recent readings. */
+  limits: { at: number; windows: LimitWindow[] } | undefined
+  limitSamples: LimitSamples
+  /** Actions of the main loop that keep failing the same way, and the loop (its start) last pushed. */
+  loops: Map<string, LoopStreak>
+  pushedLoopFor: number
+  /** Telegram and Discord message ids of the latest turns' notifications, to update them in place. */
+  telegramIds: Map<string, number>
+  discordIds: Map<string, string>
 }
 
 const fresh = (): Runtime => ({
@@ -182,10 +216,19 @@ const fresh = (): Runtime => ({
   budgetAt: -Infinity,
   budgetLeft: undefined,
   autoPlan: true,
+  turnCalls: 0,
+  planAsked: false,
+  promptAsked: false,
   mode: undefined,
   background: new Map(),
   finished: new Set(),
   held: undefined,
+  limits: undefined,
+  limitSamples: {},
+  loops: new Map(),
+  pushedLoopFor: 0,
+  telegramIds: new Map(),
+  discordIds: new Map(),
 })
 
 /** Marks a call as waiting for the person's permission. */
@@ -256,6 +299,12 @@ async function doRefresh($: Engine, force: boolean): Promise<void> {
     rt.pushedStallFor = l.since
     quiet(push($, 'stalled', { quietMs: now - l.since }))
   }
+  const loop = rt.turnActive ? currentLoop(rt.loops, now) : undefined
+  if (loop && rt.pushedLoopFor !== loop.since) {
+    rt.pushedLoopFor = loop.since
+    const u = await read($, usage)
+    quiet(push($, 'loop', { loop: { what: loop.detail ?? loop.label, count: loop.count, sameError: loop.sameError, forMs: now - loop.since, tokens: totalTokens(u) - loop.tokensAtStart || undefined } }))
+  }
   if (rt.pendingPause && !rt.turnActive && now - rt.pendingPause.at >= ASK_PUSH_AFTER_MS) {
     const { workedMs, sequence } = rt.pendingPause
     rt.pendingPause = undefined
@@ -263,7 +312,7 @@ async function doRefresh($: Engine, force: boolean): Promise<void> {
   }
   const current = await read($, plan)
   const news = liveDue(current, now)
-  if (news) quiet(push($, 'step', { sequence: turnSeq(now), doing: news.doing }))
+  if (news) quiet(push($, 'step', { sequence: turnSeq(now), doing: news.doing, etaMs: planEtaMs(current, now) }))
   const key = [l.phase, l.since, l.label ?? '', l.detail ?? ''].join('|')
   if (key !== rt.lastLiveKey || force) {
     rt.lastLiveKey = key
@@ -365,6 +414,9 @@ async function pulse($: Engine, l: KvLive, now: number, force: boolean): Promise
     lastDataAt: l.lastDataAt,
     turnStartedAt: l.turnStartedAt,
     background: rt.background.size,
+    limits: rt.limits
+      ? { at: rt.limits.at, windows: rt.limits.windows, samples: Object.fromEntries(Object.entries(rt.limitSamples).map(([kind, v]) => [kind, v.points])) }
+      : undefined,
     step: pr.current && p.step ? { title: pr.current.title, startedAt: p.step.startedAt, actions: p.step.actions, typicalMs: typicalMs(p) } : undefined,
   }
   try {
@@ -443,28 +495,96 @@ const PUSH_EVENT: Record<PushKind, 'needs-you' | 'done' | 'error' | 'stuck' | 's
   paused: 'done',
   error: 'error',
   stalled: 'stuck',
+  loop: 'stuck',
   step: 'steps',
 }
 
 /** Sends one push to the phone; a failure only costs that push. */
-async function push($: Engine, kind: PushKind, extra: { label?: string; workedMs?: number; quietMs?: number; sequence?: string; doing?: string } = {}): Promise<void> {
+async function push(
+  $: Engine,
+  kind: PushKind,
+  extra: {
+    label?: string
+    workedMs?: number
+    quietMs?: number
+    sequence?: string
+    doing?: string
+    etaMs?: number
+    loop?: { what: string; count: number; sameError: boolean; forMs: number; tokens?: number }
+  } = {},
+): Promise<void> {
   const cfg = rt.phone
   if (!cfg) return
   const wanted = kind === 'step' ? cfg.events.includes('steps') || cfg.events.includes('actions') : cfg.events.includes(PUSH_EVENT[kind])
   if (!wanted) return
-  if (kind === 'step' && !(await quietAllowed($, cfg))) return
+  if (kind === 'step' && cfg.topic && !(await quietAllowed($, cfg))) return
   const p = await read($, plan)
   const u = await read($, usage)
   const { sequence, ...info } = extra
-  const body = ntfyBody(cfg, { ...phonePush(kind, { project: rt.project, plan: p, tokens: totalTokens(u) || undefined, ...info }, cfg.details), sequence })
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (cfg.token) headers.Authorization = `Bearer ${cfg.token}`
-  try {
-    const res = await $.http.fetch(cfg.server, { method: 'POST', headers, body })
-    if (res.ok && rt.budgetLeft !== undefined) rt.budgetLeft -= 1
-  } catch {
-    // offline or refused by policy: the pane still shows it
+  const message: PhonePush = { ...phonePush(kind, { project: rt.project, plan: p, tokens: totalTokens(u) || undefined, ...info }, cfg.details), sequence }
+  // Every channel set up; a failure costs that channel's push only.
+  if (cfg.topic) {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (cfg.token) headers.Authorization = `Bearer ${cfg.token}`
+    try {
+      const res = await $.http.fetch(cfg.server, { method: 'POST', headers, body: ntfyBody(cfg, message) })
+      if (res.ok && rt.budgetLeft !== undefined) rt.budgetLeft -= 1
+    } catch {
+      // offline or refused by policy: the pane still shows it
+    }
   }
+  if (cfg.telegram) await toTelegram($, cfg.telegram, message).catch(() => undefined)
+  if (cfg.discord) await toDiscord($, cfg.discord.webhook, message, PUSH_COLOR[kind]).catch(() => undefined)
+}
+
+const JSON_HEADERS = { 'Content-Type': 'application/json' }
+
+/**
+ * A turn's notification on Telegram: a silent progress update edits the message, an alert (the
+ * turn's end) replaces it with a new one, which notifies.
+ */
+async function toTelegram($: Engine, t: { token: string; chatId: string }, push: PhonePush): Promise<void> {
+  const api = (method: string) => `https://api.telegram.org/bot${t.token}/${method}`
+  const text = telegramText(push)
+  const prev = push.sequence ? rt.telegramIds.get(push.sequence) : undefined
+  if (prev !== undefined && push.priority <= 2) {
+    const res = await $.http.fetch(api('editMessageText'), {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ chat_id: t.chatId, message_id: prev, text, parse_mode: 'HTML', link_preview_options: { is_disabled: true } }),
+    })
+    if (res.ok || /not modified/i.test(res.text)) return
+  } else if (prev !== undefined) {
+    await $.http.fetch(api('deleteMessage'), { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ chat_id: t.chatId, message_id: prev }) }).catch(() => undefined)
+  }
+  const res = await $.http.fetch(api('sendMessage'), {
+    method: 'POST',
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ chat_id: t.chatId, text, parse_mode: 'HTML', disable_notification: push.priority <= 2, link_preview_options: { is_disabled: true } }),
+  })
+  const id = res.ok ? (JSON.parse(res.text) as { result?: { message_id?: unknown } }).result?.message_id : undefined
+  if (push.sequence && typeof id === 'number') remember(rt.telegramIds, push.sequence, id)
+}
+
+/** The same on Discord, through the channel's webhook. */
+async function toDiscord($: Engine, webhook: string, push: PhonePush, color: number): Promise<void> {
+  const body = discordBody(push, color)
+  const prev = push.sequence ? rt.discordIds.get(push.sequence) : undefined
+  if (prev !== undefined && push.priority <= 2) {
+    const { flags: _silent, ...edit } = body
+    const res = await $.http.fetch(`${webhook}/messages/${prev}`, { method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify(edit) })
+    if (res.ok) return
+  } else if (prev !== undefined) {
+    await $.http.fetch(`${webhook}/messages/${prev}`, { method: 'DELETE' }).catch(() => undefined)
+  }
+  const res = await $.http.fetch(`${webhook}?wait=true`, { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) })
+  const id = res.ok ? (JSON.parse(res.text) as { id?: unknown }).id : undefined
+  if (push.sequence && typeof id === 'string') remember(rt.discordIds, push.sequence, id)
+}
+
+function remember<V>(m: Map<string, V>, key: string, value: V): void {
+  m.set(key, value)
+  while (m.size > 20) m.delete(m.keys().next().value!)
 }
 
 /**
@@ -549,9 +669,21 @@ export const register: Register = on => {
   // The words are fixed and never contain anything from the prompt.
   on('prompt.submit', async ($, e, next) => {
     if (e.command || e.isMeta) return next(e)
+    rt.loops.clear() // the person spoke: whatever the agent was stuck on is theirs to judge
     await loadPhone($, await $.clock.now())
     if (!rt.autoPlan || !wantsPlanContext(await read($, plan))) return next(e)
+    rt.planAsked = true // a prompt queued into a running turn asks that turn
+    rt.promptAsked = true
     return next({ ...e, context: [...(e.context ?? []), PLAN_CONTEXT] })
+  }).catch(($, e, next) => next(e))
+
+  // Claude Code keeps its task tools behind ToolSearch, where a model asked for a plan often
+  // does not find them ("I have no TaskCreate"), and the progress bar stays empty. While
+  // automatic planning is on they stay in the tool list. Answered once, when a session first
+  // shows its tools, so it never changes under a running thread.
+  on('tool.describe', { tool: ['TaskCreate', 'TaskUpdate', 'TodoWrite'] }, async ($, e, next) => {
+    const described = await next(e)
+    return rt.autoPlan ? { ...described, isDeferred: false } : described
   }).catch(($, e, next) => next(e))
 
   on('turn.start', async ($, e, next) => {
@@ -567,6 +699,9 @@ export const register: Register = on => {
       rt.turnSeq = rt.held?.sequence ?? turnSequence(rt.sessionId, now)
       if (rt.held) rt.held.idleSince = undefined
       rt.progressSent = false
+      rt.turnCalls = 0
+      rt.planAsked = rt.promptAsked
+      rt.promptAsked = false
       rt.pendingPause = undefined // the person answered
       rt.progressSentDone = progress((await read($, plan)).tasks).done
       quiet(refresh($))
@@ -641,6 +776,9 @@ export const register: Register = on => {
       rt.betweenSince = await $.clock.now()
     }
     const end = await $.clock.now()
+    if (!isPlan && !e.agentId && ran.deny === undefined) {
+      noteCall(rt.loops, loopKey(e.tool, describeTool(e.tool, input, rt.cwd)), describeTool(e.tool, input, rt.cwd), ran.isError === true ? resultText(ran.result) : undefined, end, totalTokens(await read($, usage)))
+    }
     if (!isPlan) await update($, recent, list => endAction(list, id, end, ran.deny !== undefined || ran.isError === true))
     else if (ran.deny === undefined && !ran.isError && e.tool !== 'TaskList' && e.tool !== 'TaskGet') {
       const files = e.tool === 'TodoWrite' ? undefined : await taskFiles($)
@@ -649,6 +787,16 @@ export const register: Register = on => {
       await update($, plan, p => advance(p, tasks, end, files?.times))
     }
     await refresh($)
+    // A long turn that began without a plan (a resumed session, a prompt the model planned
+    // nothing for) is asked once, beside a tool's result, which the model reads and the person
+    // does not see.
+    if (!e.agentId && !isPlan && ran.deny === undefined && rt.autoPlan) {
+      rt.turnCalls += 1
+      if (rt.turnCalls >= PLAN_ASK_AFTER && !rt.planAsked && wantsPlanContext(await read($, plan))) {
+        rt.planAsked = true
+        return { ...ran, context: [...(ran.context ?? []), PLAN_REMINDER] }
+      }
+    }
     return ran
   }).catch(($, e, next) => next(e)) // an observer: if it fails, the call goes on as if it were not here
 
@@ -697,6 +845,24 @@ export const register: Register = on => {
       quiet(refresh($))
     }
    }).catch(($, e, next) => next(e))
+
+  // The subscription's usage windows, as each API response reports them: the pane shows them and
+  // the editor, reading the heartbeat, warns before one runs out.
+  on('session.measure', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      const windows = (e.rateLimits ?? []).map(w => ({ kind: w.kind, percentUsed: w.percentUsed, resetsAt: w.resetsAt }))
+      if (windows.length) {
+        const now = await $.clock.now()
+        rt.limits = { at: now, windows }
+        rt.limitSamples = addLimitSamples(rt.limitSamples, windows, now)
+        quiet(refresh($, true))
+      }
+    } catch {
+      // an observer: the measurement stands
+    }
+    return r
+  })
 
   // An agent the model started in the background: the turn may end while it works on.
   on('agent.spawn', async ($, e, next) => {
@@ -787,6 +953,12 @@ export const register: Register = on => {
     const tokens = totalTokens(u)
     const ctx = contextPercent(u)
     const showRecent = isActivePhase(l.phase) || (l.phase === 'done' && now - l.since < 10 * 60_000)
+    const eta = isActivePhase(l.phase) ? planEtaMs(p, now) : undefined
+    const loop = isActivePhase(l.phase) ? currentLoop(rt.loops, now) : undefined
+    const limits = (rt.limits?.windows ?? []).map(w => {
+      const reset = w.resetsAt ? Date.parse(w.resetsAt) : NaN
+      return { label: limitLabel(w.kind), pct: w.percentUsed, reset: Number.isFinite(reset) ? reset : undefined, out: limitRunsOut(rt.limitSamples[w.kind]?.points ?? [], w, now) }
+    })
 
     return (
       <Box flexDirection="column">
@@ -797,7 +969,7 @@ export const register: Register = on => {
               <Text mono color="suggestion">{cells.active}</Text>
               <Text mono dimColor>{cells.rest}</Text>
               <Text bold>{` ${pr.done}/${pr.total}`}</Text>
-              <Text dimColor>{` · ${pr.percent}%`}</Text>
+              <Text dimColor>{` · ${pr.percent}%${eta !== undefined ? ` · ${fmtEta(eta)}` : ''}`}</Text>
             </Box>
             {pr.current ? <Text bold wrap="wrap">{pr.current.active ?? pr.current.title}</Text> : null}
             {pr.current && p.step ? (
@@ -811,6 +983,13 @@ export const register: Register = on => {
         ) : (
           <Text dimColor wrap="wrap">No plan yet. For multi-step work Claude keeps a task list, and its progress shows here.</Text>
         )}
+        {loop ? (
+          <Box marginTop={1}>
+            <Text color="warning" wrap="wrap">
+              {`⟳ Going in circles: “${loop.detail ?? loop.label}” failed ${loop.count}× in a row${loop.sameError ? ' with the same error' : ''} · ${fmtDuration(now - loop.since)}`}
+            </Text>
+          </Box>
+        ) : null}
         <Box marginTop={1}>
           <Text color={toneColor} wrap="wrap">{`${line.icon} ${line.text}`}</Text>
         </Box>
@@ -833,6 +1012,11 @@ export const register: Register = on => {
               {`${fmtTokens(tokens)} tokens${u.isWholeSession ? '' : ' since Kvali started'}${ctx !== undefined ? ` · context ${ctx}%` : ''}`}
             </Text>
           </Box>
+        ) : null}
+        {limits.length ? (
+          <Text color={limits.some(x => x.out !== undefined) ? 'warning' : 'inactive'} wrap="wrap">
+            {`Limits: ${limits.map(x => `${x.label} ${Math.round(x.pct)}%${x.out !== undefined ? (x.out <= now ? ' used up' : ` · runs out in ${fmtAbout(x.out - now)}`) : x.reset !== undefined && x.reset > now ? ` · resets in ${fmtMinutes(x.reset - now)}` : ''}`).join(' · ')}`}
+          </Text>
         ) : null}
         {pr.total > 0 ? (
           <Box flexDirection="column" marginTop={1}>

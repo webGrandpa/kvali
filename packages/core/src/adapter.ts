@@ -1,3 +1,4 @@
+import type { AgentLimits } from './limits.ts';
 import type { AgentId, AgentSession } from './model.ts';
 import type { Pricing } from './pricing.ts';
 import { JsonlTail } from './util/jsonl.ts';
@@ -31,6 +32,8 @@ export interface Adapter {
   readonly id: AgentId;
   readonly label: string;
   poll(ctx: AdapterContext): Promise<AgentSession[]>;
+  /** The account's plan limits as of the last poll, for agents that report them. */
+  limits?(ctx: AdapterContext): AgentLimits | undefined;
   dispose?(): void;
 }
 

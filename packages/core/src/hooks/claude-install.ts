@@ -129,15 +129,27 @@ async function writeWithBackup(file: string, before: string | undefined, setting
   return backup;
 }
 
-export async function installClaudeHooks(file = claudeSettingsPath(), port = DEFAULT_HOOK_PORT): Promise<{ backup?: string }> {
+/** The same settings whatever the order of their keys (Claude Code reads them by name). */
+function canonical(v: unknown): string {
+  return JSON.stringify(v, (_k, x) =>
+    x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x,
+  );
+}
+
+/** Adds Kvali's hooks, or brings them up to date. A file that already has them as they should be is left untouched. */
+export async function installClaudeHooks(file = claudeSettingsPath(), port = DEFAULT_HOOK_PORT): Promise<{ backup?: string; changed: boolean }> {
   const before = await fsp.readFile(file, 'utf8').catch(() => undefined);
-  const settings = withoutKvali(await readSettings(file));
+  const current = await readSettings(file);
+  const settings = withoutKvali(current);
   settings.hooks = settings.hooks && typeof settings.hooks === 'object' ? settings.hooks : {};
   for (const spec of CLAUDE_HOOKS) {
     const groups = Array.isArray(settings.hooks[spec.event]) ? settings.hooks[spec.event] : [];
     settings.hooks[spec.event] = [...groups, { hooks: [hookEntry(spec, port)] }];
   }
-  return { backup: await writeWithBackup(file, before, settings) };
+  // Each editor window with Kvali runs this as it starts: writing a file that needs no change
+  // would only race Claude Code's own writes to it.
+  if (before !== undefined && canonical(settings) === canonical(current)) return { changed: false };
+  return { backup: await writeWithBackup(file, before, settings), changed: true };
 }
 
 export async function uninstallClaudeHooks(file = claudeSettingsPath()): Promise<{ backup?: string; changed: boolean }> {

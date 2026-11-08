@@ -21,12 +21,14 @@ import path from 'node:path';
 import type { Adapter, AdapterContext } from '../adapter.ts';
 import { staleness } from '../adapter.ts';
 import type { Activity, AgentSession, DailyUsage, PulsePhase, TaskItem, TaskStatus, TokenUsage } from '../model.ts';
-import { addTokens, emptyTokens, progressOf } from '../model.ts';
+import { addTokens, emptyTokens, progressOf, totalTokens } from '../model.ts';
 import { findGitRoot, listDir, readJsonSafe, statSafe } from '../util/fs.ts';
 import { JsonlTail } from '../util/jsonl.ts';
 import { TaskTimer } from '../util/task-timer.ts';
 import { contentText, firstLine, stripInjectedTags, summarizeCommand, truncate } from '../util/text.ts';
-import { dayKey, parseTime } from '../util/time.ts';
+import { addTaskDone, addWork, dayKey, parseTime } from '../util/time.ts';
+import { LimitBook, claudeWindowLabel, type AgentLimits } from '../limits.ts';
+import { LoopWatch, loopKey } from '../util/loop-watch.ts';
 
 type Phase = 'working' | 'tool' | 'idle' | 'interrupted' | 'error';
 
@@ -49,6 +51,8 @@ interface ClaudeState {
   /** Directory the session was started in: it defines the project. */
   launchCwd?: string;
   version?: string;
+  /** How Claude Code was started: `cli`, `claude-vscode`, `sdk-ts`, … */
+  entrypoint?: string;
   /** Current working directory (may change when the agent cds). */
   cwd?: string;
   model?: string;
@@ -88,6 +92,8 @@ interface ClaudeState {
   turnEndedBy?: string;
   /** The last message on the person's side, whoever wrote it: what a new turn answers. */
   promptAt?: number;
+  /** The previous record's time, for the day's work time. */
+  lastRecordAt?: number;
   live?: LiveState & { mtimeMs: number };
   /** The heartbeat Kvali's Claude Code plugin writes from inside the session. */
   pulse?: PulseFile & { mtimeMs: number };
@@ -97,6 +103,8 @@ interface ClaudeState {
    * Claude Code tells the session each one's end in a `<task-notification>`, which wakes it.
    */
   background: Map<string, { kind: 'agent' | 'workflow'; label: string; startedAt: number }>;
+  /** Actions that keep failing the same way. */
+  loops: LoopWatch;
   timer: TaskTimer;
   recent: Activity[];
   trouble?: { message: string; at: number; attempt?: number; maxAttempts?: number };
@@ -119,6 +127,11 @@ interface PulseFile {
    * each one end, a stop from Claude Code's task list too, which leaves no mark in the transcript.
    */
   background?: number;
+  /**
+   * The subscription's usage windows as the session's last API response reported them (from
+   * 0.7.0), with the readings of the last hours (`[at, percent]`) so the pace is known at once.
+   */
+  limits?: { at: number; windows: { kind: string; percentUsed: number; resetsAt?: string | number }[]; samples?: Record<string, [number, number][]> };
 }
 
 /** The plugin rewrites its heartbeat at least every 10 s while a turn runs. */
@@ -240,6 +253,8 @@ export class ClaudeCodeAdapter implements Adapter {
   private readonly dirCache = new Map<string, { mtimeMs: number; files: { file: string; mtimeMs: number }[] }>();
   private lastDiscovery = 0;
   private lastFullScan = 0;
+  /** The subscription's usage windows, from every session's plugin heartbeat. */
+  private readonly limitBook = new LimitBook();
 
   configDir(ctx: AdapterContext): string {
     const fromEnv = ctx.env.CLAUDE_CONFIG_DIR?.split(',')[0]?.trim();
@@ -323,6 +338,7 @@ export class ClaudeCodeAdapter implements Adapter {
   }
 
   private createState(file: string): ClaudeState {
+    const daily: Record<string, DailyUsage> = {};
     return {
       file,
       sessionId: path.basename(file, '.jsonl'),
@@ -332,7 +348,7 @@ export class ClaudeCodeAdapter implements Adapter {
       tokens: emptyTokens(),
       costUsd: 0,
       pricedAll: true,
-      daily: {},
+      daily,
       maxContext: 0,
       tasks: new Map(),
       pendingCreates: new Map(),
@@ -344,7 +360,8 @@ export class ClaudeCodeAdapter implements Adapter {
       turnOpen: false,
       subagents: new Map(),
       background: new Map(),
-      timer: new TaskTimer(),
+      loops: new LoopWatch(),
+      timer: new TaskTimer((at) => addTaskDone(daily, at)),
       recent: [],
       lastSubagentScan: 0,
     };
@@ -364,8 +381,13 @@ export class ClaudeCodeAdapter implements Adapter {
     if (ts !== undefined) {
       if (st.startedAt === undefined || ts < st.startedAt) st.startedAt = ts;
       if (ts > st.updatedAt) st.updatedAt = ts;
+      // The agent's own records (a response, a tool's result) close a stretch of its work.
+      const agentWrote = (o.type === 'assistant' && !o.isSidechain) || (o.type === 'user' && Array.isArray(o.message?.content) && o.message.content.some((b: any) => b?.type === 'tool_result'));
+      if (agentWrote) addWork(st.daily, st.lastRecordAt, ts);
+      if (st.lastRecordAt === undefined || ts > st.lastRecordAt) st.lastRecordAt = ts;
     }
     if (typeof o.version === 'string') st.version = o.version;
+    if (typeof o.entrypoint === 'string') st.entrypoint = o.entrypoint;
     if (typeof o.cwd === 'string' && o.cwd) {
       st.cwd = o.cwd;
       st.launchCwd ??= o.cwd;
@@ -581,7 +603,10 @@ export class ClaudeCodeAdapter implements Adapter {
           st.pendingCreates.delete(b.tool_use_id);
         }
         const done = st.open.get(b.tool_use_id);
-        if (done) done.endedAt = ts;
+        if (done) {
+          done.endedAt = ts;
+          st.loops.observe(loopKey(done), done, b.is_error === true ? contentText(b.content) || 'error' : undefined, ts, totalTokens(st.tokens));
+        }
         st.open.delete(b.tool_use_id);
       }
       // An agent or workflow started in the background: the call returns at once, the work goes on.
@@ -616,6 +641,7 @@ export class ClaudeCodeAdapter implements Adapter {
       st.phase = 'interrupted';
       st.phaseAt = ts;
       st.open.clear();
+      st.loops.reset();
       this.endTurn(st, ts, undefined);
       return;
     }
@@ -631,6 +657,7 @@ export class ClaudeCodeAdapter implements Adapter {
       st.turnStartedAt = ts;
       st.turnOpen = true;
       st.turnEndedBy = undefined;
+      st.loops.reset();
     }
     if (!isCommand) {
       st.phase = 'working';
@@ -689,6 +716,7 @@ export class ClaudeCodeAdapter implements Adapter {
     else if (pst.mtimeMs !== st.pulse?.mtimeMs) {
       const pulse = await readJsonSafe<PulseFile>(pulseFile);
       st.pulse = pulse && typeof pulse.at === 'number' && typeof pulse.phase === 'string' ? { ...pulse, mtimeMs: pst.mtimeMs } : undefined;
+      if (st.pulse?.limits) this.addLimits(st.pulse.limits);
     }
 
     // Subagent transcripts (tokens only), current layout.
@@ -708,6 +736,29 @@ export class ClaudeCodeAdapter implements Adapter {
       }
     }
     for (const [, sub] of st.subagents) await sub.tail.read((rec) => this.onRecord(st, rec, ctx, true));
+  }
+
+  /** The subscription's windows (account-wide), as any session's plugin reported them. */
+  limits(ctx: AdapterContext): AgentLimits | undefined {
+    const windows = this.limitBook.windows(ctx.now());
+    return windows.length ? { agent: this.id, agentLabel: this.label, windows } : undefined;
+  }
+
+  private addLimits(l: NonNullable<PulseFile['limits']>): void {
+    if (typeof l.at !== 'number' || !Array.isArray(l.windows)) return;
+    for (const w of l.windows) {
+      if (!w || typeof w.kind !== 'string' || typeof w.percentUsed !== 'number') continue;
+      const { label, windowMinutes } = claudeWindowLabel(w.kind);
+      const reset = typeof w.resetsAt === 'string' ? Date.parse(w.resetsAt) : w.resetsAt;
+      const resetsAt = typeof reset === 'number' && Number.isFinite(reset) ? reset : undefined;
+      const series = l.samples?.[w.kind];
+      if (Array.isArray(series)) {
+        for (const pt of series) {
+          if (Array.isArray(pt) && typeof pt[0] === 'number' && typeof pt[1] === 'number') this.limitBook.add({ label, usedPercent: pt[1], resetsAt, windowMinutes }, pt[0]);
+        }
+      }
+      this.limitBook.add({ label, usedPercent: w.percentUsed, resetsAt, windowMinutes }, l.at);
+    }
   }
 
   /** Older Claude Code versions wrote subagents as top-level agent-*.jsonl files that reference the parent session. */
@@ -760,7 +811,9 @@ export class ClaudeCodeAdapter implements Adapter {
     }
 
     let lastSignal = st.updatedAt;
-    const live = st.live;
+    // Where Kvali's plugin runs in the session its heartbeat is exact; the hooks, kept for Claude
+    // Code versions that cannot load the plugin, would only repeat it less exactly.
+    const live = st.pulse ? undefined : st.live;
     if (live?.at && live.at >= st.phaseAt - 1_000) {
       lastSignal = Math.max(lastSignal, live.at);
       const type = live.notificationType;
@@ -847,6 +900,7 @@ export class ClaudeCodeAdapter implements Adapter {
     const title = ownTitle || st.firstPrompt || 'Untitled session';
 
     let activity = status === 'working' ? (background ?? st.activity) : undefined;
+    const loop = status === 'working' || status === 'stale' ? st.loops.current(now) : undefined;
     if (status === 'working' && st.phase === 'tool' && st.open.size > 0) activity = [...st.open.values()].pop();
 
     return {
@@ -860,6 +914,7 @@ export class ClaudeCodeAdapter implements Adapter {
       cwd: st.launchCwd,
       model: st.model,
       agentVersion: st.version,
+      host: st.entrypoint === undefined ? undefined : st.entrypoint === 'cli' ? 'terminal' : /vscode|jetbrains|ide/.test(st.entrypoint) ? 'editor' : 'app',
       status,
       statusDetail: detail,
       startedAt: st.startedAt,
@@ -874,6 +929,16 @@ export class ClaudeCodeAdapter implements Adapter {
       turns: st.turns,
       turn: st.turnStartedAt !== undefined ? { steps: st.turnSteps, startedAt: st.turnStartedAt } : undefined,
       current: status === 'working' || status === 'waiting' || status === 'stale' ? st.timer.current(tasks) : undefined,
+      loop: loop
+        ? {
+            label: loop.label,
+            detail: loop.detail,
+            count: loop.count,
+            sameError: loop.sameError,
+            since: loop.since,
+            tokens: loop.tokensAtStart !== undefined ? totalTokens(st.tokens) - loop.tokensAtStart : undefined,
+          }
+        : undefined,
       recent: st.recent.slice(0, 5),
       trouble: status === 'working' || status === 'stale' ? st.trouble : undefined,
       pulse,

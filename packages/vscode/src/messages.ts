@@ -1,12 +1,17 @@
 /** Messages exchanged between the extension host and the Agents webview. */
 import type { HookStatus, Snapshot } from '@kvali/core/browser';
 
-/** Phone notifications as the panel shows them (the access token never reaches the webview). */
+/** Phone notifications as the panel shows them (tokens and webhooks never reach the webview). */
 export interface PhoneView {
   server: string;
-  topic: string;
+  /** The ntfy topic, when ntfy is set up. */
+  topic?: string;
   /** `ntfy://` link that subscribes the ntfy app; the QR code encodes it. */
-  link: string;
+  link?: string;
+  /** Telegram is set up: the bot's name. */
+  telegram?: { bot?: string };
+  /** Discord is set up. */
+  discord: boolean;
   events: string[];
   details: boolean;
   /** A task's end is pushed when it took at least this many seconds (0: every task). */
@@ -14,6 +19,17 @@ export interface PhoneView {
 }
 
 export type Scope = 'all' | 'workspace';
+
+/** The weekly card's two sizes: wide for links and X, tall for LinkedIn and Instagram feeds. */
+export type ShareFormat = 'landscape' | 'portrait';
+
+/** Messages from the "Share your week" panel. */
+export type FromShare =
+  | { type: 'ready' }
+  | { type: 'save'; dataUrl: string; format: ShareFormat }
+  | { type: 'copyText'; text: string }
+  | { type: 'copyFailed' }
+  | { type: 'open'; url: string };
 /** `unset` until the user answers the one-time setup offer. */
 export type SetupState = 'on' | 'off' | 'unset';
 
@@ -46,6 +62,7 @@ export type FromWebview =
   | { type: 'setScope'; scope: Scope }
   | { type: 'open'; key: string }
   | { type: 'resume'; key: string }
+  | { type: 'goto'; key: string }
   | { type: 'runSetup' }
   | { type: 'dismissSetup' }
   | { type: 'copy'; text: string }
@@ -62,5 +79,10 @@ export type FromWebview =
         | 'kvali.showLog'
         | 'kvali.phoneSetup'
         | 'kvali.phoneTest'
-        | 'kvali.phoneOff';
+        | 'kvali.phoneOff'
+        | 'kvali.telegramSetup'
+        | 'kvali.discordSetup'
+        | 'kvali.telegramOff'
+        | 'kvali.discordOff'
+        | 'kvali.shareWeek';
     };

@@ -2,7 +2,7 @@
   "name": "kvali",
   "displayName": "Kvali — AI Agent Progress Tracker",
   "description": "One progress bar for all your AI coding agents: plan progress, the current step, usage and alerts on your phone, grouped by project. Local and read-only.",
-  "version": "0.6.8",
+  "version": "0.7.0",
   "publisher": "webgrandpa",
   "author": {
     "name": "Giorgi Khiladze",
@@ -137,6 +137,38 @@
         "command": "kvali.phoneOff",
         "title": "Stop Phone Notifications",
         "category": "Kvali"
+      },
+      {
+        "command": "kvali.telegramSetup",
+        "title": "Send Notifications to Telegram",
+        "category": "Kvali"
+      },
+      {
+        "command": "kvali.discordSetup",
+        "title": "Send Notifications to Discord",
+        "category": "Kvali"
+      },
+      {
+        "command": "kvali.telegramOff",
+        "title": "Stop Telegram Notifications",
+        "category": "Kvali"
+      },
+      {
+        "command": "kvali.discordOff",
+        "title": "Stop Discord Notifications",
+        "category": "Kvali"
+      },
+      {
+        "command": "kvali.shareWeek",
+        "title": "Share My Week",
+        "category": "Kvali",
+        "icon": "$(export)"
+      },
+      {
+        "command": "kvali.goToAgent",
+        "title": "Go to Agent…",
+        "category": "Kvali",
+        "icon": "$(go-to-file)"
       }
     ],
     "menus": {
@@ -175,6 +207,11 @@
           "command": "kvali.phoneSetup",
           "when": "view == kvali.sessions",
           "group": "more@0"
+        },
+        {
+          "command": "kvali.shareWeek",
+          "when": "view == kvali.sessions",
+          "group": "more@5"
         }
       ]
     },
@@ -197,7 +234,7 @@
         "kvali.autoPlan": {
           "type": "boolean",
           "default": true,
-          "description": "With the Claude Code hooks installed, ask Claude for a task list whenever a session has no unfinished plan (about 60 tokens per prompt, only while there is no plan)."
+          "description": "With the Claude Code hooks installed, ask Claude for a task list whenever a session has no unfinished plan (about 60 tokens per prompt, only while there is no plan). With Kvali's plugin it also keeps Claude Code's task tools in its tool list, so they are never hidden behind ToolSearch."
         },
         "kvali.activeWindowHours": {
           "type": "number",
@@ -282,6 +319,11 @@
               "codex",
               "gemini-cli",
               "antigravity",
+              "copilot",
+              "cline",
+              "roo-code",
+              "kilo-code",
+              "opencode",
               "progress-file"
             ]
           },
@@ -308,6 +350,7 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc -p . && tsc -p webview",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test --test-reporter=spec test/*.test.ts",
     "package": "node esbuild.mjs --production && vsce package --no-dependencies",
     "vscode:uninstall": "node ./dist/uninstall.js"
   },

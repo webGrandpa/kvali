@@ -31,6 +31,19 @@ const builds = [
     logLevel: 'warning',
   },
   {
+    entryPoints: ['webview/share.tsx'],
+    outfile: 'dist/webview/share.js',
+    bundle: true,
+    platform: 'browser',
+    format: 'iife',
+    target: 'es2022',
+    jsx: 'automatic',
+    jsxImportSource: 'preact',
+    sourcemap: !production,
+    minify: production,
+    logLevel: 'warning',
+  },
+  {
     entryPoints: ['webview/main.tsx'],
     outfile: 'dist/webview/main.js',
     bundle: true,
@@ -55,6 +68,7 @@ if (production) {
 }
 await mkdir('dist/webview', { recursive: true });
 await copyFile('webview/styles.css', 'dist/webview/main.css');
+await copyFile('webview/share.css', 'dist/webview/share.css');
 // The Claude Code plugin ships inside the extension; Turn on installs it.
 await copyClaudePlugin('dist/claude-plugin');
 

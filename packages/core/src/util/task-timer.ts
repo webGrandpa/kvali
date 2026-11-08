@@ -22,6 +22,12 @@ export class TaskTimer {
   private steps = 0;
   private readonly fileStarted = new Map<string, number>();
   private fileDurations: number[] = [];
+  private readonly onDone?: (at: number) => void;
+
+  /** `onDone` hears each step the plan finishes, with when (for the day's count). */
+  constructor(onDone?: (at: number) => void) {
+    this.onDone = onDone;
+  }
 
   /** Feed the full task list whenever it changes, with the time of the change. */
   observe(tasks: readonly TaskItem[], at: number): void {
@@ -34,6 +40,7 @@ export class TaskTimer {
         const s = this.started.get(key);
         if (s !== undefined && at >= s) this.durations.push(at - s);
       }
+      if (t.status === 'completed' && prev !== undefined) this.onDone?.(at);
       this.status.set(key, t.status);
     }
     const cur = tasks.find((t) => t.status === 'in_progress');

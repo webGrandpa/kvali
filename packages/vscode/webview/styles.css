@@ -126,9 +126,12 @@ button {
   column-gap: 8px;
   font-variant-numeric: tabular-nums;
 }
-.limit .muted.small {
+.limit .limit-note {
   grid-column: 1 / -1;
   margin-top: -2px;
+}
+.limit.running-out .limit-name {
+  color: var(--c-wait);
 }
 .limit-name {
   display: inline-flex;
@@ -182,6 +185,42 @@ button {
 }
 .agent-antigravity {
   --agent: var(--vscode-charts-green, #89d185);
+}
+/* The theme's chart palette has no more distinct colors: these match the share image. */
+.agent-copilot {
+  --agent: #8fa8c8;
+}
+.agent-cline {
+  --agent: #5ec8d8;
+}
+.agent-roo-code {
+  --agent: #f2b84b;
+}
+.agent-kilo-code {
+  --agent: #e8d55b;
+}
+.agent-opencode {
+  --agent: #c3cad8;
+}
+body.vscode-light .agent-copilot,
+body.vscode-high-contrast-light .agent-copilot {
+  --agent: #5b7493;
+}
+body.vscode-light .agent-cline,
+body.vscode-high-contrast-light .agent-cline {
+  --agent: #1b8fa3;
+}
+body.vscode-light .agent-roo-code,
+body.vscode-high-contrast-light .agent-roo-code {
+  --agent: #b97f10;
+}
+body.vscode-light .agent-kilo-code,
+body.vscode-high-contrast-light .agent-kilo-code {
+  --agent: #a08c10;
+}
+body.vscode-light .agent-opencode,
+body.vscode-high-contrast-light .agent-opencode {
+  --agent: #6b7385;
 }
 .agent-progress-file {
   --agent: var(--muted);
@@ -518,6 +557,13 @@ time {
 .link .chevron {
   color: inherit;
 }
+.link.go {
+  font-weight: 600;
+}
+.card.s-waiting .link.go,
+.card.s-error .link.go {
+  color: var(--vscode-button-background);
+}
 
 .tasks {
   list-style: none;
@@ -793,4 +839,21 @@ time {
 }
 .phone-row .icon {
   opacity: 0.8;
+}
+
+/* ---------- other notification channels ---------- */
+
+.channels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 2px 0 8px;
+}
+.channel {
+  white-space: nowrap;
+}
+
+.share-link {
+  margin-left: 10px;
+  white-space: nowrap;
 }

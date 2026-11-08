@@ -3,9 +3,12 @@
 Live progress for long Claude Code tasks, in a pane beside the chat:
 
 - **The plan** as a progress bar (Claude Code's Tasks or TodoWrite), with the step in progress.
-- **The current step on a clock**: "4m 12s on this step · usually ~6m", from how long this plan's earlier steps took.
+- **The current step on a clock**: "4m 12s on this step · usually ~6m", and the time left for the whole plan ("~20m left"), from how long this plan's earlier steps took.
 - **What Claude is doing right now**, straight from Claude Code's own events, so nothing is guessed: thinking, writing the answer, preparing a tool call, running “pnpm test” for 41s, waiting for your answer, or "no data from the API for 1m 30s" when the connection stalls.
 - **The latest actions** with their durations, and the **tokens** the session spent with how full the context window is.
+- **Your plan limits**: the 5-hour and weekly usage of your Claude subscription, and when each runs out at the pace of the last hour ("5h 72% · runs out in ~40m"). The Kvali extension and `kvali` show them too.
+- **Going in circles**: when the same action fails again and again with the same error, the pane says so, with the tokens it cost.
+- **Background agents**: agents Claude started in the background count as work until each one reports back, so "finished" comes once, at the real end.
 
 The status line shows the short version (`Kvali · 3/7 · 43% · Writing tests · thinking`), and a long turn ends with a notification.
 
@@ -13,7 +16,7 @@ It works wherever Claude Code runs: the terminal, the desktop app, the VS Code e
 
 ## On your phone
 
-With phone notifications set up (`kvali phone` or **Kvali: Send Notifications to My Phone** in the editor), the plugin sends this session's pushes through ntfy by itself, no editor needed: the turn's progress through its plan as one silent notification that each finished step updates (at most once a minute) and the turn's end replaces, and alerts when a question has waited a minute for your answer (one answered at the computer sends nothing), a turn of two minutes or more (or one whose progress you followed) finished, or stopped mid-plan and waited a minute, an error, or no data from the API. It follows the choices made in Kvali's phone card or with `kvali phone --events` (each finished step, every action live, every task or only longer ones) and reads the shared setup in `~/.kvali/config.json` once a minute.
+With phone notifications set up (`kvali phone`, `kvali phone telegram`, `kvali phone discord`, or **Kvali: Send Notifications to My Phone** in the editor), the plugin sends this session's pushes through ntfy, Telegram or Discord by itself, no editor needed: the turn's progress through its plan as one silent notification that each finished step updates (at most once a minute) and the turn's end replaces, and alerts when a question has waited a minute for your answer (one answered at the computer sends nothing), a turn of two minutes or more (or one whose progress you followed) finished, or stopped mid-plan and waited a minute, an error, no data from the API, an action failing the same way again and again, or a plan limit about to run out. It follows the choices made in Kvali's phone card or with `kvali phone --events` (each finished step, every action live, every task or only longer ones) and reads the shared setup in `~/.kvali/config.json` once a minute.
 
 ## With the Kvali editor extension
 
@@ -38,6 +41,6 @@ claude plugin test packages/claude-plugin
 
 ## Privacy
 
-The plugin keeps its state on your computer and has no telemetry. It sends something only when you set up phone notifications: short status lines to the ntfy server you chose, never code or prompts. [Privacy](https://github.com/webGrandpa/kvali/blob/main/PRIVACY.md) · [Security policy](https://github.com/webGrandpa/kvali/blob/main/SECURITY.md) · MIT License
+The plugin keeps its state on your computer and has no telemetry. It sends something only when you set up phone notifications: short status lines to the ntfy server, Telegram bot or Discord channel you chose, never code or prompts. [Privacy](https://github.com/webGrandpa/kvali/blob/main/PRIVACY.md) · [Security policy](https://github.com/webGrandpa/kvali/blob/main/SECURITY.md) · MIT License
 
 Kvali is an independent open-source project, not affiliated with or endorsed by Anthropic. Claude and Claude Code are trademarks of Anthropic, used only to say what this plugin works with.

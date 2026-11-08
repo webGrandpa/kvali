@@ -58,6 +58,76 @@ export function typicalMs(plan: KvPlan): number | undefined {
   return median(plan.durations.length >= plan.fileDurations.length ? plan.durations : plan.fileDurations)
 }
 
+/**
+ * How long the rest of the plan should take at its own pace: the typical step for each step
+ * left, less the time already spent on the current one. Undefined until a step has finished.
+ */
+export function planEtaMs(plan: KvPlan, now: number): number | undefined {
+  const typical = typicalMs(plan)
+  if (!typical) return undefined
+  const p = progress(plan.tasks)
+  const left = p.total - p.done
+  if (!p.total || left <= 0) return undefined
+  const spent = p.current && plan.step ? Math.max(0, now - plan.step.startedAt) : 0
+  return Math.max(0, typical - spent) + (left - 1) * typical
+}
+
+/** One usage window as Claude Code reports it (`session.measure`, `$.session.usage()`). */
+export type LimitWindow = { kind: string; percentUsed: number; resetsAt?: string }
+/** Each window's readings over the last hour and a half (`[at, percent]`), within its current period. */
+export type LimitSamples = Record<string, { resetsAt?: string; points: [number, number][] }>
+
+const LIMIT_KEEP_MS = 90 * 60_000
+const LIMIT_PACE_MS = 60 * 60_000
+
+const sameReset = (a?: string, b?: string): boolean => !a || !b || Math.abs(Date.parse(a) - Date.parse(b)) <= 5 * 60_000
+
+/** Adds a reading of each window: a new value, or the same one again after five minutes. A window that reset starts over. */
+export function addLimitSamples(prev: LimitSamples, windows: readonly LimitWindow[], now: number): LimitSamples {
+  const out: LimitSamples = {}
+  for (const w of windows) {
+    if (typeof w?.kind !== 'string' || typeof w.percentUsed !== 'number') continue
+    const old = prev[w.kind]
+    let points: [number, number][] = old && sameReset(old.resetsAt, w.resetsAt) ? old.points.filter(([at]) => now - at <= LIMIT_KEEP_MS) : []
+    const last = points[points.length - 1]
+    if (!last || last[1] !== w.percentUsed || now - last[0] >= 5 * 60_000) points = [...points, [now, w.percentUsed]]
+    out[w.kind] = { resetsAt: w.resetsAt, points: points.slice(-40) }
+  }
+  return out
+}
+
+/** When a window is used up at the pace of the last hour, if that comes before it resets; the extension's forecast. */
+export function limitRunsOut(points: readonly [number, number][], w: LimitWindow, now: number): number | undefined {
+  const last = points[points.length - 1]
+  if (!last) return undefined
+  if (w.percentUsed >= 100) return last[0]
+  if (now - last[0] > LIMIT_PACE_MS) return undefined
+  const first = points.find(([at]) => at >= last[0] - LIMIT_PACE_MS)
+  if (!first || last[0] - first[0] < 5 * 60_000) return undefined
+  const rate = (last[1] - first[1]) / (last[0] - first[0])
+  if (!(rate > 0)) return undefined
+  const out = last[0] + (100 - last[1]) / rate
+  const reset = w.resetsAt ? Date.parse(w.resetsAt) : NaN
+  return Number.isFinite(reset) && out >= reset ? undefined : Math.round(out)
+}
+
+/** Claude Code's window kinds as short labels: `five_hour` 5h, `seven_day` weekly. */
+export function limitLabel(kind: string): string {
+  if (kind === 'five_hour') return '5h'
+  const week = /^seven_day(?:_(\w+))?$/.exec(kind)
+  if (week) return week[1] ? `weekly ${week[1]}` : 'weekly'
+  return kind === 'spend_limit' ? 'spend' : kind.replace(/_/g, ' ')
+}
+
+/** "~20m left", "~1h 10m left", "under a minute left". */
+export function fmtEta(ms: number): string {
+  if (ms < 60_000) return 'under a minute left'
+  const m = Math.round(ms / 60_000)
+  if (m < 60) return `~${m}m left`
+  const h = Math.floor(m / 60)
+  return m % 60 ? `~${h}h ${m % 60}m left` : `~${h}h left`
+}
+
 function normStatus(s: unknown): KvTask['status'] {
   return s === 'completed' ? 'completed' : s === 'in_progress' ? 'in_progress' : 'pending'
 }
@@ -221,6 +291,75 @@ export function fmtMinutes(ms: number): string {
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
 }
 
+// ---------- going in circles: the same action failing the same way, again and again ----------
+
+/** The same error this many times in a row is a loop; so are this many failures whatever their errors. */
+const SAME_ERROR_RUNS = 4
+const ANY_ERROR_RUNS = 8
+const LOOP_FORGET_MS = 30 * 60_000
+
+export type LoopStreak = { label: string; detail?: string; count: number; same: number; sig: string; since: number; last: number; tokens: number }
+export type KvLoop = { label: string; detail?: string; count: number; sameError: boolean; since: number; tokensAtStart: number }
+
+/** A short fingerprint of an error's last lines; numbers (times, counts, ports) do not count, the same as the extension's. */
+export function errorSignature(text: string): string {
+  const tail = text.slice(-600).toLowerCase().replace(/\d+(?:\.\d+)?/g, '#').replace(/\s+/g, ' ').trim()
+  let h = 0x811c9dc5
+  for (let i = 0; i < tail.length; i++) {
+    h ^= tail.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return (h >>> 0).toString(36)
+}
+
+/** The key of an action: a command by its command line, a file tool by its file. */
+export const loopKey = (tool: string, d: { label: string; detail?: string }): string => (tool === 'Bash' ? `command:${d.detail ?? d.label}` : `${tool}:${d.detail ?? ''}`)
+
+/** One finished call: a failure lengthens its action's streak (the same error, or not), a success ends it. */
+export function noteCall(streaks: Map<string, LoopStreak>, key: string, d: { label: string; detail?: string }, error: string | undefined, now: number, tokens: number): void {
+  if (error === undefined) {
+    streaks.delete(key)
+    return
+  }
+  const sig = errorSignature(error)
+  const s = streaks.get(key)
+  if (!s || now - s.last > LOOP_FORGET_MS) {
+    streaks.set(key, { label: d.label, detail: d.detail, count: 1, same: 1, sig, since: now, last: now, tokens })
+    return
+  }
+  s.count += 1
+  s.same = s.sig === sig ? s.same + 1 : 1
+  s.sig = sig
+  s.last = now
+  s.label = d.label
+}
+
+/** The longest streak that counts as going in circles, if any. */
+export function currentLoop(streaks: ReadonlyMap<string, LoopStreak>, now: number): KvLoop | undefined {
+  let best: LoopStreak | undefined
+  for (const s of streaks.values()) {
+    if (now - s.last > LOOP_FORGET_MS || (s.same < SAME_ERROR_RUNS && s.count < ANY_ERROR_RUNS)) continue
+    if (!best || s.count > best.count) best = s
+  }
+  return best ? { label: best.label, detail: best.detail, count: best.count, sameError: best.same >= SAME_ERROR_RUNS, since: best.since, tokensAtStart: best.tokens } : undefined
+}
+
+/** The text of a failed call's result, for its fingerprint. */
+export function resultText(result: unknown): string {
+  if (typeof result === 'string') return result
+  try {
+    return JSON.stringify(result) ?? 'error'
+  } catch {
+    return 'error'
+  }
+}
+
+/** A forecast, to the minute: "~30m", "~1h 05m". */
+export function fmtAbout(ms: number): string {
+  const m = Math.max(1, Math.round(ms / 60_000))
+  return m < 60 ? `~${m}m` : `~${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
+}
+
 export function fmtTokens(n: number): string {
   if (n < 1_000) return String(Math.round(n))
   if (n < 1_000_000) return `${(n / 1_000).toFixed(n < 10_000 ? 1 : 0)}k`
@@ -368,11 +507,23 @@ export const projectSlug = (dir: string): string => dir.replace(/[^a-zA-Z0-9]/g,
 
 // ---------- phone notifications (shared setup in ~/.kvali/config.json) ----------
 
-export type PhoneEvent = 'needs-you' | 'done' | 'error' | 'stuck' | 'steps' | 'actions'
+export type PhoneEvent = 'needs-you' | 'done' | 'error' | 'stuck' | 'steps' | 'actions' | 'limits'
 /** `doneAfterSec`: a turn's end is pushed when it took at least this long (0: every turn), or when the phone followed it. */
-export type PhoneCfg = { server: string; topic: string; token?: string; events: PhoneEvent[]; details: boolean; doneAfterSec: number }
-const PHONE_EVENTS: readonly PhoneEvent[] = ['needs-you', 'done', 'steps', 'actions', 'error', 'stuck']
-const DEFAULT_EVENTS: readonly PhoneEvent[] = ['needs-you', 'done', 'error', 'stuck', 'steps']
+export type PhoneCfg = {
+  server: string
+  /** The ntfy topic; absent when only Telegram or Discord receives the notifications. */
+  topic?: string
+  token?: string
+  telegram?: { token: string; chatId: string }
+  discord?: { webhook: string }
+  events: PhoneEvent[]
+  details: boolean
+  doneAfterSec: number
+}
+const PHONE_EVENTS: readonly PhoneEvent[] = ['needs-you', 'done', 'steps', 'actions', 'error', 'stuck', 'limits']
+const DEFAULT_EVENTS: readonly PhoneEvent[] = ['needs-you', 'done', 'error', 'stuck', 'steps', 'limits']
+/** Kvali 0.6's default, before limits: it reads as today's default. */
+const DEFAULT_EVENTS_V2: readonly PhoneEvent[] = ['needs-you', 'done', 'error', 'stuck', 'steps']
 
 /** Kvali 0.5 saved this list as its default, before progress existed: it reads as today's default. */
 const DEFAULT_EVENTS_V1: readonly PhoneEvent[] = ['needs-you', 'done', 'error', 'stuck']
@@ -385,13 +536,32 @@ export function parsePhoneConfig(text: string): PhoneCfg | undefined {
   } catch {
     return undefined
   }
-  if (typeof r.topic !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(r.topic)) return undefined
+  const topic = typeof r.topic === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(r.topic) ? r.topic : undefined
+  const tg = r.telegram && typeof r.telegram === 'object' ? (r.telegram as Record<string, unknown>) : undefined
+  const chatId = typeof tg?.chatId === 'number' ? String(tg.chatId) : tg?.chatId
+  const telegram =
+    tg && typeof tg.token === 'string' && /^\d{5,15}:[A-Za-z0-9_-]{30,64}$/.test(tg.token) && typeof chatId === 'string' && /^-?\d{1,20}$/.test(chatId)
+      ? { token: tg.token, chatId }
+      : undefined
+  const hook = r.discord && typeof r.discord === 'object' ? (r.discord as Record<string, unknown>).webhook : undefined
+  const discord =
+    typeof hook === 'string' && /^https:\/\/(?:(?:ptb|canary)\.)?discord(?:app)?\.com\/api\/webhooks\/\d{5,25}\/[A-Za-z0-9_-]{20,120}$/.test(hook) ? { webhook: hook } : undefined
+  if (!topic && !telegram && !discord) return undefined
   const server = typeof r.server === 'string' && /^https?:\/\/[^\s/]/.test(r.server) ? r.server.replace(/\/+$/, '') : 'https://ntfy.sh'
   let events = Array.isArray(r.events) ? r.events.filter((e): e is PhoneEvent => PHONE_EVENTS.includes(e as PhoneEvent)) : [...DEFAULT_EVENTS]
-  const v1Default = events.length === DEFAULT_EVENTS_V1.length && DEFAULT_EVENTS_V1.every(e => events.includes(e))
-  if (r.v === undefined && v1Default) events = [...DEFAULT_EVENTS]
+  const same = (list: readonly PhoneEvent[]) => events.length === list.length && list.every(e => events.includes(e))
+  if ((r.v === undefined && same(DEFAULT_EVENTS_V1)) || (r.v === 2 && same(DEFAULT_EVENTS_V2))) events = [...DEFAULT_EVENTS]
   const doneAfterSec = typeof r.doneAfter === 'number' && Number.isFinite(r.doneAfter) && r.doneAfter >= 0 ? Math.min(Math.round(r.doneAfter), 86_400) : 120
-  return { server, topic: r.topic, token: typeof r.token === 'string' && r.token ? r.token : undefined, events, details: r.details !== false, doneAfterSec }
+  return {
+    server,
+    ...(topic ? { topic } : {}),
+    token: typeof r.token === 'string' && r.token ? r.token : undefined,
+    ...(telegram ? { telegram } : {}),
+    ...(discord ? { discord } : {}),
+    events,
+    details: r.details !== false,
+    doneAfterSec,
+  }
 }
 
 /** Silent updates pause while fewer messages than this are left for the day, so alerts still get through. */
@@ -411,12 +581,12 @@ export function messagesLeftOf(text: string): number | undefined {
 
 /** `sequence`: the notification it replaces (ntfy's sequence ID), so a turn's progress and its end are one notification. */
 export type PhonePush = { title: string; message: string; priority: 2 | 3 | 4; tags: string[]; sequence?: string }
-export type PushKind = 'needs-you' | 'finished' | 'paused' | 'error' | 'stalled' | 'step'
+export type PushKind = 'needs-you' | 'finished' | 'paused' | 'error' | 'stalled' | 'loop' | 'step'
 
 /** The words of a push, the same as the extension's. Without details no project or step names leave the computer. */
 export function phonePush(
   kind: PushKind,
-  info: { project: string; plan: KvPlan; label?: string; workedMs?: number; tokens?: number; quietMs?: number; doing?: string },
+  info: { project: string; plan: KvPlan; label?: string; workedMs?: number; tokens?: number; quietMs?: number; doing?: string; etaMs?: number; loop?: { what: string; count: number; sameError: boolean; forMs: number; tokens?: number } },
   details: boolean,
 ): PhonePush {
   const where = details && info.project ? ` · ${info.project}` : ''
@@ -444,6 +614,12 @@ export function phonePush(
         priority: 3,
         tags: ['warning'],
       }
+    case 'loop': {
+      const l = info.loop
+      const what = l ? (details ? `“${truncate(l.what, 80)}”` : 'The same action') : 'An action'
+      const facts = l ? [`failed ${l.count} times in a row${l.sameError ? ' with the same error' : ''}`, `for ${fmtDuration(l.forMs)}`, l.tokens ? `${fmtTokens(l.tokens)} tokens` : undefined] : ['keeps failing']
+      return { title: `Claude Code is going in circles${where}`, message: `${what} ${facts.filter(Boolean).join(' · ')}. It may need a hint from you.`, priority: 4, tags: ['repeat'] }
+    }
     case 'step':
     {
       // The turn's live notification: the plan's progress and, when chosen, the action running now.
@@ -452,11 +628,53 @@ export function phonePush(
       const doing = details && info.doing ? `Doing: ${truncate(info.doing, 120)}` : undefined
       return {
         title: p.total ? `Claude Code${where} · ${p.done}/${p.total}` : `Claude Code${where} · working`,
-        message: lines(p.total ? `${phoneBar(p.done, p.total)} ${p.percent}%` : undefined, line, doing) || 'Working',
+        message: lines(p.total ? `${phoneBar(p.done, p.total)} ${p.percent}%${info.etaMs !== undefined ? ` · ${fmtEta(info.etaMs)}` : ''}` : undefined, line, doing) || 'Working',
         priority: 2,
         tags: ['arrow_forward'],
       }
     }
+  }
+}
+
+const TAG_EMOJI: Record<string, string> = {
+  white_check_mark: '✅',
+  bell: '🔔',
+  x: '❌',
+  raised_hand: '✋',
+  warning: '⚠️',
+  hourglass: '⏳',
+  hourglass_flowing_sand: '⏳',
+  repeat: '🔁',
+  arrow_forward: '▶️',
+}
+const emojiOf = (push: PhonePush): string | undefined => push.tags.map(t => TAG_EMOJI[t]).find(Boolean)
+const escapeHtml = (t: string): string => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+/** A push as a Telegram message (HTML): bold title, the message below it; the same as the extension's. */
+export function telegramText(push: PhonePush): string {
+  const emoji = emojiOf(push)
+  return `${emoji ? `${emoji} ` : ''}<b>${escapeHtml(push.title)}</b>${push.message ? `\n${escapeHtml(push.message)}` : ''}`
+}
+
+/** Discord embed colors by what happened. */
+export const PUSH_COLOR: Record<PushKind, number> = {
+  'needs-you': 0xd29922,
+  finished: 0x3fb950,
+  paused: 0xd29922,
+  error: 0xf85149,
+  stalled: 0xdb6d28,
+  loop: 0xdb6d28,
+  step: 0x58a6ff,
+}
+
+/** A push as a Discord webhook message: one embed; silent updates do not notify. */
+export function discordBody(push: PhonePush, color: number): Record<string, unknown> {
+  const emoji = emojiOf(push)
+  return {
+    username: 'Kvali',
+    allowed_mentions: { parse: [] },
+    embeds: [{ title: `${emoji ? `${emoji} ` : ''}${push.title}`.slice(0, 256), description: push.message.slice(0, 4_000), color }],
+    ...(push.priority <= 2 ? { flags: 4_096 } : {}),
   }
 }
 
@@ -480,8 +698,18 @@ export const baseName = (p: string): string => p.replace(/[\\/]+$/, '').split(/[
 /** Sent beside a prompt while the session has no unfinished plan: the same words as Kvali's hook. */
 export const PLAN_CONTEXT =
   'Progress tracking (Kvali): if this request takes more than two steps, start by creating a task list with TaskCreate ' +
-  '(or TodoWrite), keep exactly one task in_progress, and mark each task completed as soon as it is done. ' +
+  'or TodoWrite, whichever you have (if neither is in your tool list, load one with ToolSearch first), keep exactly ' +
+  'one task in_progress, and mark each task completed as soon as it is done. ' +
   'The user follows your progress from that list, so keep it current.'
+
+/** Tool calls into a turn with no plan before Kvali asks for one beside a result, once a turn. */
+export const PLAN_ASK_AFTER = 6
+
+/** What a long turn with no plan reads after one of its tool results (once a turn). */
+export const PLAN_REMINDER =
+  'Progress tracking (Kvali): this work has no task list yet. If more than two steps remain, create one now for the ' +
+  'steps left with TaskCreate or TodoWrite, whichever you have (load it with ToolSearch if it is not in your tool list), ' +
+  'keep one task in_progress, and mark each completed as you finish it. The user follows your progress from that list.'
 
 /** `autoPlan` in Kvali's config file; on unless set to false. */
 export function autoPlanEnabled(text: string | undefined): boolean {

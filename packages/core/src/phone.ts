@@ -1,7 +1,9 @@
 /**
  * Phone notifications through ntfy (https://ntfy.sh): free, open source, apps for iOS and
  * Android, no account. Kvali publishes to a topic with an unguessable name; the person
- * subscribes to it in the ntfy app. Self-hosted ntfy servers work the same way.
+ * subscribes to it in the ntfy app. Self-hosted ntfy servers work the same way. A Telegram
+ * bot of the person's own and a Discord channel's webhook can receive the same notifications,
+ * besides ntfy or instead of it.
  *
  * The setup lives in `~/.kvali/config.json`, shared by the editor extension, the CLI and
  * the Claude Code plugin, so one setup covers every way Kvali runs.
@@ -9,8 +11,9 @@
 import { randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
-import { fmtDuration, fmtTokens, projectName, sessionTokens } from './format.ts';
-import { currentTask, progressOf, type AgentSession, type SessionStatus, type Snapshot } from './model.ts';
+import { fmtAbout, fmtClock, fmtDuration, fmtEta, fmtTokens, planEta, projectName, sessionTokens } from './format.ts';
+import type { AgentLimits } from './limits.ts';
+import { currentTask, progressOf, type AgentSession, type RateLimitWindow, type SessionStatus, type Snapshot } from './model.ts';
 
 /**
  * What the phone hears about, each chosen by the person:
@@ -18,30 +21,50 @@ import { currentTask, progressOf, type AgentSession, type SessionStatus, type Sn
  * - `done`: a task finished, when it worked at least `doneAfterSec` (or the phone followed it).
  * - `steps`: each finished plan step, as the task's silent live notification.
  * - `actions`: what the agent is doing right now, in that same live notification.
- * - `error`, `stuck`: an error stopped the agent; it went silent or stopped responding.
+ * - `error`, `stuck`: an error stopped the agent; it went silent, stopped responding or goes in circles.
+ * - `limits`: a plan's usage window will run out before it resets, or is 90% used.
  */
-export type PhoneEvent = 'needs-you' | 'done' | 'error' | 'stuck' | 'steps' | 'actions';
-export const PHONE_EVENTS: readonly PhoneEvent[] = ['needs-you', 'done', 'steps', 'actions', 'error', 'stuck'];
+export type PhoneEvent = 'needs-you' | 'done' | 'error' | 'stuck' | 'steps' | 'actions' | 'limits';
+export const PHONE_EVENTS: readonly PhoneEvent[] = ['needs-you', 'done', 'steps', 'actions', 'error', 'stuck', 'limits'];
 /**
  * Progress (`steps`) is on: it is one silent notification per task that each finished step
  * updates in place (Android; the iPhone app lists each update, silently) and the task's end
  * replaces.
  */
-export const DEFAULT_PHONE_EVENTS: PhoneEvent[] = ['needs-you', 'done', 'error', 'stuck', 'steps'];
+export const DEFAULT_PHONE_EVENTS: PhoneEvent[] = ['needs-you', 'done', 'error', 'stuck', 'steps', 'limits'];
 /** Kvali 0.5 saved this list as its default, before progress existed: it reads as today's default. */
 const DEFAULT_EVENTS_V1: readonly PhoneEvent[] = ['needs-you', 'done', 'error', 'stuck'];
-const PHONE_CONFIG_VERSION = 2;
+/** Kvali 0.6 saved this one, before limits: it reads as today's default too. */
+const DEFAULT_EVENTS_V2: readonly PhoneEvent[] = ['needs-you', 'done', 'error', 'stuck', 'steps'];
+const PHONE_CONFIG_VERSION = 3;
 export const DEFAULT_NTFY_SERVER = 'https://ntfy.sh';
 /** A task's end is pushed when it worked at least this long (seconds), unless the person chose otherwise. */
 export const DEFAULT_DONE_AFTER_SEC = 120;
 /** The task lengths offered in the editor: every task, 30 seconds, 2 minutes, 5 minutes. */
 export const DONE_AFTER_CHOICES: readonly number[] = [0, 30, 120, 300];
 
+/** A Telegram bot the person made with @BotFather, and their chat with it. */
+export interface TelegramChannel {
+  token: string;
+  chatId: string;
+  /** The bot's username, shown in the editor. */
+  bot?: string;
+}
+
+/** A Discord channel's webhook (Channel settings → Integrations → Webhooks). */
+export interface DiscordChannel {
+  webhook: string;
+}
+
 export interface PhoneConfig {
+  /** The ntfy server. */
   server: string;
-  topic: string;
+  /** The ntfy topic; absent when only Telegram or Discord receives the notifications. */
+  topic?: string;
   /** Access token for a protected topic or a self-hosted server. */
   token?: string;
+  telegram?: TelegramChannel;
+  discord?: DiscordChannel;
   events: PhoneEvent[];
   /** Include project, task and step names. Off: only the agent and what happened. */
   details: boolean;
@@ -55,20 +78,47 @@ export interface PhoneConfig {
 export const kvaliConfigFile = (home: string): string => path.join(home, '.kvali', 'config.json');
 
 const TOPIC_RE = /^[A-Za-z0-9_-]{1,64}$/;
+export const TELEGRAM_TOKEN_RE = /^\d{5,15}:[A-Za-z0-9_-]{30,64}$/;
+export const DISCORD_WEBHOOK_RE = /^https:\/\/(?:(?:ptb|canary)\.)?discord(?:app)?\.com\/api\/webhooks\/\d{5,25}\/[A-Za-z0-9_-]{20,120}$/;
+
+function normalizeTelegram(raw: unknown): TelegramChannel | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const t = raw as Record<string, unknown>;
+  const chatId = typeof t.chatId === 'number' ? String(t.chatId) : t.chatId;
+  if (typeof t.token !== 'string' || !TELEGRAM_TOKEN_RE.test(t.token) || typeof chatId !== 'string' || !/^-?\d{1,20}$/.test(chatId)) return undefined;
+  return { token: t.token, chatId, ...(typeof t.bot === 'string' && /^\w{3,64}$/.test(t.bot) ? { bot: t.bot } : {}) };
+}
+
+function normalizeDiscord(raw: unknown): DiscordChannel | undefined {
+  const w = raw && typeof raw === 'object' ? (raw as Record<string, unknown>).webhook : undefined;
+  return typeof w === 'string' && DISCORD_WEBHOOK_RE.test(w) ? { webhook: w } : undefined;
+}
 
 export function normalizePhoneConfig(raw: unknown): PhoneConfig | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const r = raw as Record<string, unknown>;
-  if (typeof r.topic !== 'string' || !TOPIC_RE.test(r.topic)) return undefined;
+  const topic = typeof r.topic === 'string' && TOPIC_RE.test(r.topic) ? r.topic : undefined;
+  const telegram = normalizeTelegram(r.telegram);
+  const discord = normalizeDiscord(r.discord);
+  if (!topic && !telegram && !discord) return undefined;
   const server = typeof r.server === 'string' && /^https?:\/\/[^\s/]/.test(r.server) ? r.server.replace(/\/+$/, '') : DEFAULT_NTFY_SERVER;
   let events = Array.isArray(r.events)
     ? r.events.filter((e): e is PhoneEvent => PHONE_EVENTS.includes(e as PhoneEvent))
     : [...DEFAULT_PHONE_EVENTS];
-  const v1Default = events.length === DEFAULT_EVENTS_V1.length && DEFAULT_EVENTS_V1.every((e) => events.includes(e));
-  if (r.v === undefined && v1Default) events = [...DEFAULT_PHONE_EVENTS];
+  const same = (list: readonly PhoneEvent[]) => events.length === list.length && list.every((e) => events.includes(e));
+  if ((r.v === undefined && same(DEFAULT_EVENTS_V1)) || (r.v === 2 && same(DEFAULT_EVENTS_V2))) events = [...DEFAULT_PHONE_EVENTS];
   const doneAfterSec =
     typeof r.doneAfter === 'number' && Number.isFinite(r.doneAfter) && r.doneAfter >= 0 ? Math.min(Math.round(r.doneAfter), 86_400) : DEFAULT_DONE_AFTER_SEC;
-  return { server, topic: r.topic, token: typeof r.token === 'string' && r.token ? r.token : undefined, events, details: r.details !== false, doneAfterSec };
+  return {
+    server,
+    ...(topic ? { topic } : {}),
+    token: typeof r.token === 'string' && r.token ? r.token : undefined,
+    ...(telegram ? { telegram } : {}),
+    ...(discord ? { discord } : {}),
+    events,
+    details: r.details !== false,
+    doneAfterSec,
+  };
 }
 
 export async function readPhoneConfig(home: string): Promise<PhoneConfig | undefined> {
@@ -97,8 +147,10 @@ export async function writePhoneConfig(home: string, cfg: PhoneConfig | undefine
     all.phone = {
       v: PHONE_CONFIG_VERSION,
       server: cfg.server,
-      topic: cfg.topic,
+      ...(cfg.topic ? { topic: cfg.topic } : {}),
       ...(cfg.token ? { token: cfg.token } : {}),
+      ...(cfg.telegram ? { telegram: cfg.telegram } : {}),
+      ...(cfg.discord ? { discord: cfg.discord } : {}),
       events: cfg.events,
       details: cfg.details,
       doneAfter: cfg.doneAfterSec ?? DEFAULT_DONE_AFTER_SEC,
@@ -141,7 +193,7 @@ export function newPhoneConfig(server = DEFAULT_NTFY_SERVER): PhoneConfig {
  * Opens the ntfy app already subscribed to the topic. Android follows it; on an iPhone the
  * topic is added in the app by name.
  */
-export function subscribeLink(cfg: Pick<PhoneConfig, 'server' | 'topic'>): string {
+export function subscribeLink(cfg: { server: string; topic: string }): string {
   const u = new URL(cfg.server);
   const base = `${u.host}${u.pathname.replace(/\/+$/, '')}`;
   return `ntfy://${base}/${cfg.topic}?display=Kvali${u.protocol === 'http:' ? '&secure=false' : ''}`;
@@ -163,7 +215,7 @@ export interface PhonePush {
 }
 
 /** The request that publishes `push`: ntfy's JSON form, so any language and emoji pass intact. */
-export function ntfyRequest(cfg: PhoneConfig, push: PhonePush): { url: string; method: 'POST'; headers: Record<string, string>; body: string } {
+export function ntfyRequest(cfg: PhoneConfig & { topic: string }, push: PhonePush): { url: string; method: 'POST'; headers: Record<string, string>; body: string } {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (cfg.token) headers.Authorization = `Bearer ${cfg.token}`;
   const body = JSON.stringify({
@@ -195,16 +247,241 @@ export function sequenceTag(key: string): string {
 
 export type SendResult = { ok: true } | { ok: false; error: string };
 
+/** What a channel's server answered, in words that name the host only (never a token or a webhook). */
+async function answerOf(res: Response, host: string): Promise<string> {
+  const text = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 160);
+  return `${host} answered ${res.status}${text ? `: ${text}` : ''}`;
+}
+
+function unreachable(err: unknown, host: string): string {
+  const e = err as Error & { cause?: { code?: string; message?: string } };
+  return `could not reach ${host}: ${e.cause?.code ?? e.cause?.message ?? e.message}`;
+}
+
+/** The emoji ntfy shows for a push's tags, for channels that show text only. */
+const TAG_EMOJI: Record<string, string> = {
+  white_check_mark: '✅',
+  bell: '🔔',
+  x: '❌',
+  raised_hand: '✋',
+  warning: '⚠️',
+  hourglass: '⏳',
+  hourglass_flowing_sand: '⏳',
+  repeat: '🔁',
+  arrow_forward: '▶️',
+};
+const emojiOf = (push: PhonePush): string | undefined => push.tags.map((t) => TAG_EMOJI[t]).find(Boolean);
+
+/** Discord embed colors by what happened. */
+const EVENT_COLOR: Record<PhoneEvent, number> = {
+  'needs-you': 0xd29922,
+  done: 0x3fb950,
+  steps: 0x58a6ff,
+  actions: 0x58a6ff,
+  error: 0xf85149,
+  stuck: 0xdb6d28,
+  limits: 0xd29922,
+};
+
+const escapeHtml = (t: string): string => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/** Telegram's Bot API request for a push: bold title, the message below it. */
+export function telegramText(push: PhonePush): string {
+  const emoji = emojiOf(push);
+  return `${emoji ? `${emoji} ` : ''}<b>${escapeHtml(push.title)}</b>${push.message ? `\n${escapeHtml(push.message)}` : ''}`;
+}
+
+/** Discord's webhook body for a push: one embed; silent updates do not notify. */
+export function discordBody(push: PhonePush): Record<string, unknown> {
+  const emoji = emojiOf(push);
+  return {
+    username: 'Kvali',
+    allowed_mentions: { parse: [] },
+    embeds: [{ title: `${emoji ? `${emoji} ` : ''}${push.title}`.slice(0, 256), description: push.message.slice(0, 4_000), color: EVENT_COLOR[push.event] }],
+    ...(push.priority <= 2 ? { flags: 4_096 } : {}),
+  };
+}
+
+/**
+ * Publishes pushes to every channel set up: ntfy, Telegram, Discord. A push with a `sequence`
+ * replaces the earlier one of that sequence, so a task keeps one notification: ntfy does that
+ * itself; on Telegram and Discord a silent update edits the message, and an alert (a task's end)
+ * replaces it with a new message, which notifies. The message ids live with the sender.
+ */
+export class PushSender {
+  private readonly telegramIds = new Map<string, number>();
+  private readonly discordIds = new Map<string, string>();
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(fetchImpl: typeof fetch = fetch) {
+    this.fetchImpl = fetchImpl;
+  }
+
+  async send(cfg: PhoneConfig, push: PhonePush): Promise<SendResult> {
+    const errors: string[] = [];
+    if (cfg.topic) {
+      const e = await this.ntfy(cfg as PhoneConfig & { topic: string }, push);
+      if (e) errors.push(e);
+    }
+    if (cfg.telegram) {
+      const e = await this.telegram(cfg.telegram, push);
+      if (e) errors.push(e);
+    }
+    if (cfg.discord) {
+      const e = await this.discord(cfg.discord, push);
+      if (e) errors.push(e);
+    }
+    this.trim();
+    return errors.length ? { ok: false, error: errors.join('; ') } : { ok: true };
+  }
+
+  private async ntfy(cfg: PhoneConfig & { topic: string }, push: PhonePush): Promise<string | undefined> {
+    const req = ntfyRequest(cfg, push);
+    const host = new URL(cfg.server).host;
+    try {
+      const res = await this.fetchImpl(req.url, { method: req.method, headers: req.headers, body: req.body, signal: AbortSignal.timeout(10_000) });
+      return res.ok ? undefined : await answerOf(res, host);
+    } catch (err) {
+      return unreachable(err, host);
+    }
+  }
+
+  private async telegramCall(token: string, method: string, body: Record<string, unknown>): Promise<{ ok: boolean; result?: any; error?: string }> {
+    const host = 'api.telegram.org';
+    try {
+      const res = await this.fetchImpl(`https://${host}/bot${token}/${method}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (res.ok) return { ok: true, result: ((await res.json().catch(() => ({}))) as { result?: unknown }).result };
+      return { ok: false, error: await answerOf(res, host) };
+    } catch (err) {
+      return { ok: false, error: unreachable(err, host) };
+    }
+  }
+
+  private async telegram(t: TelegramChannel, push: PhonePush): Promise<string | undefined> {
+    const text = telegramText(push);
+    const prev = push.sequence ? this.telegramIds.get(push.sequence) : undefined;
+    if (prev !== undefined && push.priority <= 2) {
+      const r = await this.telegramCall(t.token, 'editMessageText', { chat_id: t.chatId, message_id: prev, text, parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
+      if (r.ok || /not modified/i.test(r.error ?? '')) return undefined;
+    } else if (prev !== undefined) {
+      await this.telegramCall(t.token, 'deleteMessage', { chat_id: t.chatId, message_id: prev });
+    }
+    const r = await this.telegramCall(t.token, 'sendMessage', {
+      chat_id: t.chatId,
+      text,
+      parse_mode: 'HTML',
+      disable_notification: push.priority <= 2,
+      link_preview_options: { is_disabled: true },
+    });
+    if (!r.ok) return r.error;
+    if (push.sequence && typeof r.result?.message_id === 'number') this.telegramIds.set(push.sequence, r.result.message_id);
+    return undefined;
+  }
+
+  private async discord(d: DiscordChannel, push: PhonePush): Promise<string | undefined> {
+    const host = 'discord.com';
+    const body = discordBody(push);
+    const prev = push.sequence ? this.discordIds.get(push.sequence) : undefined;
+    const call = (url: string, method: string, json?: unknown) =>
+      this.fetchImpl(url, { method, headers: { 'Content-Type': 'application/json' }, ...(json ? { body: JSON.stringify(json) } : {}), signal: AbortSignal.timeout(10_000) });
+    try {
+      if (prev !== undefined && push.priority <= 2) {
+        const { flags: _silent, ...edit } = body;
+        const res = await call(`${d.webhook}/messages/${prev}`, 'PATCH', edit);
+        if (res.ok) return undefined;
+      } else if (prev !== undefined) {
+        await call(`${d.webhook}/messages/${prev}`, 'DELETE').catch(() => undefined);
+      }
+      const res = await call(`${d.webhook}?wait=true`, 'POST', body);
+      if (!res.ok) return await answerOf(res, host);
+      const id = ((await res.json().catch(() => ({}))) as { id?: unknown }).id;
+      if (push.sequence && typeof id === 'string') this.discordIds.set(push.sequence, id);
+      return undefined;
+    } catch (err) {
+      return unreachable(err, host);
+    }
+  }
+
+  /** Message ids of old sequences are forgotten: only the latest tasks are ever updated. */
+  private trim(): void {
+    for (const m of [this.telegramIds, this.discordIds] as Map<string, unknown>[]) {
+      while (m.size > 50) m.delete(m.keys().next().value!);
+    }
+  }
+}
+
+/** Sends one push to every channel set up (no in-place updates across calls: use a `PushSender` for those). */
 export async function sendPush(cfg: PhoneConfig, push: PhonePush, fetchImpl: typeof fetch = fetch): Promise<SendResult> {
-  const req = ntfyRequest(cfg, push);
+  return new PushSender(fetchImpl).send(cfg, push);
+}
+
+/** Which channels are set up, for messages: "ntfy, Telegram". */
+export function channelNames(cfg: PhoneConfig): string {
+  return [cfg.topic ? 'ntfy' : undefined, cfg.telegram ? 'Telegram' : undefined, cfg.discord ? 'Discord' : undefined].filter(Boolean).join(', ');
+}
+
+/** The bot's username when the token works, or why it does not. */
+export async function telegramBot(token: string, fetchImpl: typeof fetch = fetch): Promise<{ ok: true; username: string } | { ok: false; error: string }> {
+  if (!TELEGRAM_TOKEN_RE.test(token)) return { ok: false, error: 'that is not a bot token (it looks like 123456789:AAF…)' };
   try {
-    const res = await fetchImpl(req.url, { method: req.method, headers: req.headers, body: req.body, signal: AbortSignal.timeout(10_000) });
-    if (res.ok) return { ok: true };
-    const text = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 160);
-    return { ok: false, error: `${new URL(cfg.server).host} answered ${res.status}${text ? `: ${text}` : ''}` };
+    const res = await fetchImpl(`https://api.telegram.org/bot${token}/getMe`, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return { ok: false, error: res.status === 401 || res.status === 404 ? 'Telegram does not know this token' : await answerOf(res, 'api.telegram.org') };
+    const me = ((await res.json()) as { result?: { username?: unknown } }).result;
+    return typeof me?.username === 'string' ? { ok: true, username: me.username } : { ok: false, error: 'Telegram sent no bot name' };
   } catch (err) {
-    const e = err as Error & { cause?: { code?: string; message?: string } };
-    return { ok: false, error: `could not reach ${new URL(cfg.server).host}: ${e.cause?.code ?? e.cause?.message ?? e.message}` };
+    return { ok: false, error: unreachable(err, 'api.telegram.org') };
+  }
+}
+
+/**
+ * Waits for the person to send their bot a message and returns the chat it came from: the
+ * bot may only write to people who wrote to it first. Long-polls `getUpdates` until `waitMs`.
+ */
+export async function telegramFindChat(token: string, waitMs = 120_000, fetchImpl: typeof fetch = fetch, signal?: AbortSignal): Promise<string | undefined> {
+  const until = Date.now() + waitMs;
+  let offset: number | undefined;
+  while (Date.now() < until && !signal?.aborted) {
+    const timeout = Math.max(1, Math.min(25, Math.round((until - Date.now()) / 1000)));
+    const askedAt = Date.now();
+    let updates: { update_id: number; message?: { chat?: { id?: number; type?: string } } }[] = [];
+    try {
+      const res = await fetchImpl(`https://api.telegram.org/bot${token}/getUpdates?timeout=${timeout}${offset !== undefined ? `&offset=${offset}` : ''}`, {
+        signal: AbortSignal.timeout((timeout + 10) * 1000),
+      });
+      if (!res.ok) return undefined;
+      updates = ((await res.json()) as { result?: typeof updates }).result ?? [];
+    } catch {
+      await new Promise((r) => setTimeout(r, 2_000));
+      continue;
+    }
+    const chat = [...updates].reverse().find((u) => u.message?.chat?.type === 'private' && typeof u.message.chat.id === 'number')?.message?.chat?.id;
+    if (updates.length) offset = updates[updates.length - 1]!.update_id + 1;
+    if (chat !== undefined) {
+      // Acknowledge what was read, so the next setup does not find this message again.
+      await fetchImpl(`https://api.telegram.org/bot${token}/getUpdates?timeout=0&offset=${offset}`, { signal: AbortSignal.timeout(10_000) }).catch(() => undefined);
+      return String(chat);
+    }
+    // A server that answers at once instead of waiting is asked again a second later.
+    if (Date.now() - askedAt < 1_000) await new Promise((r) => setTimeout(r, 1_000));
+  }
+  return undefined;
+}
+
+/** Whether a Discord webhook exists (Discord answers its channel's details to anyone who has the URL). */
+export async function discordCheck(webhook: string, fetchImpl: typeof fetch = fetch): Promise<{ ok: true; name?: string } | { ok: false; error: string }> {
+  if (!DISCORD_WEBHOOK_RE.test(webhook)) return { ok: false, error: 'that is not a Discord webhook URL (https://discord.com/api/webhooks/…)' };
+  try {
+    const res = await fetchImpl(webhook, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return { ok: false, error: res.status === 401 || res.status === 404 ? 'Discord does not know this webhook' : await answerOf(res, 'discord.com') };
+    const w = (await res.json().catch(() => ({}))) as { name?: unknown };
+    return { ok: true, name: typeof w.name === 'string' ? w.name : undefined };
+  } catch (err) {
+    return { ok: false, error: unreachable(err, 'discord.com') };
   }
 }
 
@@ -223,13 +500,18 @@ function clip(text: string, max: number): string {
   return one.length <= max ? one : `${one.slice(0, max - 1).trimEnd()}…`;
 }
 
-type Kind = 'needs-you' | 'error' | 'finished' | 'paused' | 'gone' | 'trouble' | 'quiet' | 'step';
+type Kind = 'needs-you' | 'error' | 'finished' | 'paused' | 'gone' | 'trouble' | 'quiet' | 'loop' | 'step';
 
 /**
  * The words of a push. Without details, no project, task or step names leave the computer;
  * a session title taken from the person's own first message never does.
  */
-export function formatPush(kind: Kind, s: AgentSession, details: boolean, extra: { workedMs?: number; quietMs?: number; action?: boolean } = {}): PhonePush {
+export function formatPush(
+  kind: Kind,
+  s: AgentSession,
+  details: boolean,
+  extra: { workedMs?: number; quietMs?: number; action?: boolean; now?: number } = {},
+): PhonePush {
   const agent = s.agentLabel;
   const where = details ? ` · ${projectName(s.projectPath)}` : '';
   const p = progressOf(s.tasks);
@@ -290,6 +572,20 @@ export function formatPush(kind: Kind, s: AgentSession, details: boolean, extra:
         tags: ['warning'],
       };
     }
+    case 'loop': {
+      const l = s.loop;
+      const what = l ? (details ? `“${clip(l.detail ?? l.label, 80)}”` : 'The same action') : 'An action';
+      const facts = l
+        ? [`failed ${l.count} times in a row${l.sameError ? ' with the same error' : ''}`, `for ${fmtDuration((extra.now ?? Date.now()) - l.since)}`, l.tokens ? `${fmtTokens(l.tokens)} tokens` : undefined]
+        : ['keeps failing'];
+      return {
+        event: 'stuck',
+        title: `${agent} is going in circles${where}`,
+        message: lines(`${what} ${facts.filter(Boolean).join(' · ')}. It may need a hint from you.`, title),
+        priority: 4,
+        tags: ['repeat'],
+      };
+    }
     case 'quiet':
       return {
         event: 'stuck',
@@ -302,16 +598,51 @@ export function formatPush(kind: Kind, s: AgentSession, details: boolean, extra:
       // The task's live notification: the plan's progress and, when asked, the action running now.
       const doing = extra.action && s.activity && !s.activity.endedAt ? s.activity.label : undefined;
       const stepLine = details ? (stepName ? `Now: ${clip(stepName, 120)}` : nextName ? `Next: ${clip(nextName, 120)}` : undefined) : undefined;
+      const eta = extra.now !== undefined ? planEta(s, extra.now) : undefined;
       return {
         event: extra.action ? 'actions' : 'steps',
         title: p.total ? `${agent}${where} · ${p.done}/${p.total}` : `${agent}${where} · working`,
-        message: lines(p.total ? `${phoneBar(p.done, p.total)} ${p.percent}%` : undefined, stepLine, details && doing ? `Doing: ${clip(doing, 120)}` : undefined) || 'Working',
+        message:
+          lines(
+            p.total ? `${phoneBar(p.done, p.total)} ${p.percent}%${eta !== undefined ? ` · ${fmtEta(eta)}` : ''}` : undefined,
+            stepLine,
+            details && doing ? `Doing: ${clip(doing, 120)}` : undefined,
+          ) || 'Working',
         priority: 2,
         tags: ['arrow_forward'],
       };
     }
   }
 }
+
+/**
+ * A usage window running low: before it runs out at the recent pace, or once it is 90% used.
+ * Limits name no project or task, so they read the same with or without details.
+ */
+export function limitPush(l: Pick<AgentLimits, 'agentLabel'>, w: RateLimitWindow, now: number): PhonePush {
+  const used = `${Math.round(w.usedPercent)}% used`;
+  const reset = w.resetsAt !== undefined && w.resetsAt > now ? `it resets at ${fmtClock(w.resetsAt)}` : undefined;
+  if (w.runsOutAt !== undefined) {
+    return {
+      event: 'limits',
+      title: `${l.agentLabel}: ${w.label} limit runs out in ${fmtAbout(w.runsOutAt - now)}`,
+      message: `${used}. At the pace of the last hour it is used up around ${fmtClock(w.runsOutAt)}${reset ? `; ${reset}` : ''}.`,
+      priority: 4,
+      tags: ['hourglass_flowing_sand'],
+    };
+  }
+  return {
+    event: 'limits',
+    title: `${l.agentLabel}: ${w.label} limit ${used}`,
+    message: reset ? `${reset[0]!.toUpperCase()}${reset.slice(1)}.` : 'Most of this usage window is used.',
+    priority: 3,
+    tags: ['warning'],
+  };
+}
+
+/** How soon a window's forecast end is worth a push. */
+const LIMIT_SOON_MS = 60 * 60_000;
+const LIMIT_HIGH_PCT = 90;
 
 interface Track {
   status: SessionStatus;
@@ -339,6 +670,8 @@ interface Track {
   troublePushed?: boolean;
   quietPushedFor?: number;
   gonePushedFor?: number;
+  /** The loop (its start) last pushed. */
+  loopPushedFor?: number;
 }
 
 export interface PushPlannerOptions {
@@ -379,6 +712,8 @@ export interface PushPlannerOptions {
  */
 export class PushPlanner {
   private readonly tracks = new Map<string, Track>();
+  /** Usage windows seen (agent, label, reset), and whether each was pushed. */
+  private readonly limitsSeen = new Map<string, boolean>();
   private readonly now: () => number;
   private readonly startedAt: number;
   private readonly minWorkMs: number;
@@ -468,6 +803,10 @@ export class PushPlanner {
         t.troubleSince = undefined;
         t.troublePushed = false;
       }
+      if (want('stuck') && mine && s.loop && t.loopPushedFor !== s.loop.since) {
+        t.loopPushedFor = s.loop.since;
+        out.push(formatPush('loop', s, cfg.details, { now }));
+      }
       if (want('stuck') && (s.status === 'working' || s.status === 'stale')) {
         if (s.pulse?.phase === 'gone') {
           if (t.gonePushedFor !== s.pulse.at) {
@@ -515,11 +854,36 @@ export class PushPlanner {
         }
         if (actionKey !== undefined) t.sentAction = actionKey;
         t.progressSent = true;
-        out.push({ ...formatPush('step', s, cfg.details, { action: want('actions') }), sequence: t.episode });
+        out.push({ ...formatPush('step', s, cfg.details, { action: want('actions'), now }), sequence: t.episode });
       }
       t.status = s.status;
     }
     for (const k of [...this.tracks.keys()]) if (!seen.has(k)) this.tracks.delete(k);
+    out.push(...this.observeLimits(snapshot.limits, now, want('limits')));
+    return out;
+  }
+
+  /**
+   * One push per usage window: when its forecast end comes within the hour before it resets,
+   * or when it passes 90%. A window already low when Kvali starts is not news.
+   */
+  private observeLimits(limits: readonly AgentLimits[] | undefined, now: number, wanted: boolean): PhonePush[] {
+    const out: PhonePush[] = [];
+    for (const l of limits ?? []) {
+      for (const w of l.windows) {
+        const key = `${l.agent}|${w.label}|${w.resetsAt === undefined ? '' : Math.round(w.resetsAt / 600_000)}`;
+        const pressing = (w.runsOutAt !== undefined && w.runsOutAt - now <= LIMIT_SOON_MS) || (w.usedPercent >= LIMIT_HIGH_PCT && w.usedPercent < 100);
+        const pushed = this.limitsSeen.get(key);
+        if (pushed === undefined) {
+          this.limitsSeen.set(key, pressing);
+          continue;
+        }
+        if (pushed || !pressing) continue;
+        this.limitsSeen.set(key, true);
+        if (wanted) out.push(limitPush(l, w, now));
+      }
+    }
+    if (this.limitsSeen.size > 64) for (const k of [...this.limitsSeen.keys()].slice(0, this.limitsSeen.size - 64)) this.limitsSeen.delete(k);
     return out;
   }
 }
@@ -590,6 +954,7 @@ export class PhoneNotifier {
   private leftAt = -Infinity;
   private quietPaused = false;
   private readonly planner: PushPlanner;
+  private readonly sender = new PushSender();
   private readonly opts: PhoneNotifierOptions;
 
   constructor(opts: PhoneNotifierOptions) {
@@ -654,7 +1019,7 @@ export class PhoneNotifier {
     if (!cfg) return;
     const pushes = this.planner.observe(this.opts.snapshot(), cfg);
     if (!pushes.length || !this.opts.canSend()) return;
-    const send = this.opts.send ?? sendPush;
+    const send = this.opts.send ?? ((c: PhoneConfig, p: PhonePush) => this.sender.send(c, p));
     for (const p of pushes) {
       if (p.priority <= 2 && !(await this.quietAllowed(cfg))) continue;
       const r = await send(cfg, p);
@@ -663,8 +1028,9 @@ export class PhoneNotifier {
     }
   }
 
-  /** Silent updates are worth a message only while the day's allowance keeps room for alerts. */
+  /** Silent updates are worth a message only while the day's ntfy allowance keeps room for alerts. */
   private async quietAllowed(cfg: PhoneConfig): Promise<boolean> {
+    if (!cfg.topic) return true;
     const now = Date.now();
     if (now - this.leftAt >= 60_000) {
       this.leftAt = now;

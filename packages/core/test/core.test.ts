@@ -4,7 +4,7 @@ import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { ProgressFileAdapter } from '../src/adapters/progress-file.ts';
-import { fmtTokens, fmtUsd, groupByProject, pathWithin, redactPaths } from '../src/format.ts';
+import { fmtEta, fmtTokens, fmtUsd, groupByProject, pathWithin, planEta, redactPaths } from '../src/format.ts';
 import { claudeHookCommand, claudeHooksStatus, installClaudeHooks, uninstallClaudeHooks } from '../src/hooks/claude-install.ts';
 import { HookHub, normalizeHookPayload } from '../src/hooks/hub.ts';
 import { CLAUDE_PLAN_CONTEXT, claudeHookReply } from '../src/hooks/replies.ts';
@@ -197,12 +197,21 @@ test('Claude hook installer preserves user settings and is idempotent', async ()
   const home = tmpHome();
   const file = path.join(home, '.claude', 'settings.json');
   const userHook = { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo mine' }] };
-  writeText(file, JSON.stringify({ model: 'opus', hooks: { PreToolUse: [userHook], Stop: [{ hooks: [{ type: 'command', command: 'say done' }] }] } }));
+  const original = JSON.stringify({ model: 'opus', hooks: { PreToolUse: [userHook], Stop: [{ hooks: [{ type: 'command', command: 'say done' }] }] } });
+  writeText(file, original);
 
   assert.equal(await claudeHooksStatus(file), 'not-installed');
-  const { backup } = await installClaudeHooks(file, 47821);
+  const { backup, changed } = await installClaudeHooks(file, 47821);
   assert.ok(backup);
-  await installClaudeHooks(file, 47821);
+  assert.equal(changed, true);
+  const written = readFileSync(file, 'utf8');
+  assert.equal((await installClaudeHooks(file, 47821)).changed, false, 'a file that already has the hooks is not written again');
+  assert.equal(readFileSync(file, 'utf8'), written);
+  assert.equal(readFileSync(backup!, 'utf8'), original, 'nor is its backup');
+  // Claude Code may write the same settings with its keys in another order: still nothing to change.
+  const s0 = JSON.parse(written);
+  writeText(file, JSON.stringify({ hooks: Object.fromEntries(Object.entries(s0.hooks).reverse()), model: s0.model }));
+  assert.equal((await installClaudeHooks(file, 47821)).changed, false);
   assert.equal(await claudeHooksStatus(file, 47821), 'installed');
   assert.equal(await claudeHooksStatus(file, 50000), 'outdated');
 
@@ -423,4 +432,23 @@ test('A progress file written by a natively tracked agent merges into that agent
   const merged = mergeProgressFiles([claude, pf, other]);
   assert.deepEqual(merged.map((s) => s.key), ['claude-code:x', 'progress-file:/w/other']);
   assert.equal(merged[0].tasks[0].title, 'Phone check', 'the native card borrows the plan it lacked');
+});
+
+test('planEta: the time left comes from the plan\'s own pace', () => {
+  const now = 10_000_000;
+  const t = (id: string, status: 'completed' | 'in_progress' | 'pending' | 'cancelled') => ({ id, title: `Step ${id}`, status });
+  const tasks = [t('1', 'completed'), t('2', 'completed'), t('3', 'in_progress'), t('4', 'pending'), t('5', 'pending'), t('6', 'cancelled')];
+  // Finished steps took 6 minutes each; 2 minutes into the third, two more after it.
+  const s = { tasks, current: { taskId: '3', startedAt: now - 2 * 60_000, steps: 3, typicalMs: 6 * 60_000 } };
+  assert.equal(planEta(s, now), 4 * 60_000 + 2 * 6 * 60_000);
+  assert.equal(fmtEta(planEta(s, now)!), '~16m left');
+  // A step running long counts as nearly done, not as negative time.
+  assert.equal(planEta({ ...s, current: { ...s.current, startedAt: now - 20 * 60_000 } }, now), 2 * 6 * 60_000);
+  // Nothing to measure by yet, no plan, or nothing left: no guess.
+  assert.equal(planEta({ tasks, current: { taskId: '3', startedAt: now, steps: 0 } }, now), undefined);
+  assert.equal(planEta({ tasks: [], current: s.current }, now), undefined);
+  assert.equal(planEta({ tasks: [t('1', 'completed')], current: s.current }, now), undefined);
+  assert.equal(fmtEta(30_000), 'under a minute left');
+  assert.equal(fmtEta(75 * 60_000), '~1h 15m left');
+  assert.equal(fmtEta(120 * 60_000), '~2h left');
 });

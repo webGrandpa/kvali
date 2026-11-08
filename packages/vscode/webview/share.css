@@ -1,0 +1,146 @@
+/* "Share your week": the card's preview and what to do with it. */
+:root {
+  --muted: var(--vscode-descriptionForeground);
+  --border: var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.25)));
+  --surface: color-mix(in srgb, var(--vscode-foreground) 4%, transparent);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 20px 28px 32px;
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size, 13px);
+  line-height: 1.45;
+  background: var(--vscode-editor-background);
+}
+
+main {
+  max-width: 900px;
+}
+
+h1 {
+  margin: 0 0 2px;
+  font-size: 1.6em;
+  font-weight: 600;
+}
+
+header {
+  margin-bottom: 14px;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+.muted {
+  color: var(--muted);
+}
+.small {
+  font-size: 0.92em;
+}
+.note {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 18px;
+  margin: 0 0 12px;
+}
+
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.seg button {
+  border: 0;
+  background: transparent;
+  padding: 4px 10px;
+  cursor: pointer;
+  color: var(--muted);
+}
+.seg button[aria-pressed='true'] {
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.preview {
+  margin: 0 0 12px;
+}
+.preview canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 10px;
+  box-shadow: 0 6px 28px rgba(0, 0, 0, 0.35);
+}
+.preview.portrait canvas {
+  max-width: 460px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.btn {
+  border: 0;
+  border-radius: 4px;
+  padding: 6px 14px;
+  cursor: pointer;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+.btn:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+.btn.secondary {
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+}
+.btn.secondary:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+.btn:focus-visible,
+.seg button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.post-label {
+  display: block;
+  margin: 4px 0 4px;
+  font-weight: 600;
+}
+textarea {
+  width: 100%;
+  margin: 0 0 8px;
+  padding: 8px;
+  resize: vertical;
+  border: 1px solid var(--vscode-input-border, var(--border));
+  border-radius: 4px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  font: inherit;
+}

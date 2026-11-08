@@ -8,7 +8,7 @@
     {
       "name": "kvali",
       "source": "./packages/claude-plugin",
-      "description": "Live progress for Claude Code: plan progress, the current step and its time, what the agent is doing right now, and tokens."
+      "description": "Live progress for Claude Code: plan progress, the current step and the time left, what the agent is doing right now, tokens and your plan limits."
     }
   ]
 }

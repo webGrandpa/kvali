@@ -72,9 +72,9 @@ test('phone setup: an unguessable topic, saved owner-only next to other settings
 
   // Kvali 0.5's default (no progress) reads as today's default; a list saved since is kept as it is.
   writeText(file, JSON.stringify({ phone: { topic: 'kvali-t', events: ['needs-you', 'done', 'error', 'stuck'] } }));
-  assert.deepEqual((await readPhoneConfig(home))?.events, ['needs-you', 'done', 'error', 'stuck', 'steps']);
+  assert.deepEqual((await readPhoneConfig(home))?.events, ['needs-you', 'done', 'error', 'stuck', 'steps', 'limits']);
   await writePhoneConfig(home, { server: 'https://ntfy.sh', topic: 'kvali-t', events: ['needs-you', 'done', 'error', 'stuck'], details: true });
-  assert.equal(JSON.parse(readFileSync(file, 'utf8')).phone.v, 2);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).phone.v, 3);
   assert.deepEqual((await readPhoneConfig(home))?.events, ['needs-you', 'done', 'error', 'stuck'], 'progress turned off stays off');
 
   // The person's choices: live actions, and every finished task whatever its length.
@@ -437,7 +437,7 @@ test('PhoneNotifier: a finished turn reaches the phone though nothing changes af
   await engine.tick();
   await notifier.tick();
   assert.equal(engine.snapshot.sessions[0]!.status, 'working');
-  assert.deepEqual(notifier.config?.events, ['needs-you', 'done', 'error', 'stuck', 'steps']);
+  assert.deepEqual(notifier.config?.events, ['needs-you', 'done', 'error', 'stuck', 'steps', 'limits']);
 
   appendJsonl(file, [reply(150_000, 'b', { type: 'text', text: 'Done: the checkout page is refactored.' }, 'end_turn')]);
   clock.advance(1_000);
@@ -464,4 +464,16 @@ test('QR codes: a matrix for the panel and half blocks for a terminal', () => {
   const text = qrTerminal('hello', false);
   assert.equal(text.split('\n').length, Math.ceil((qrMatrix('hello').length + 4) / 2));
   assert.match(qrTerminal('hello'), /^\x1b\[38;5;16;48;5;231m/);
+});
+
+test('progress on the phone says how long the rest of the plan should take', () => {
+  let now = 9_000_000;
+  const planner = new PushPlanner({ now: () => now });
+  const current = (startedAt: number) => ({ taskId: '2', startedAt, steps: 1, typicalMs: 5 * 60_000 });
+  planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(0, 4) })), ALL);
+  now += 1_000;
+  planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(1, 4), current: current(now) })), ALL);
+  now += 2_000;
+  const step = planner.observe(snap(session({ status: 'working', updatedAt: now, tasks: tasks(1, 4), current: current(now - 2_000) })), ALL);
+  assert.equal(step[0]!.message, `${phoneBar(1, 4)} 25% · ~15m left\nNow: Step 2`);
 });

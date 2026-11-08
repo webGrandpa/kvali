@@ -47,7 +47,7 @@ function bundledPlugin(dir: string, version = '0.2.0'): string {
   return dir;
 }
 
-test('Turn on installs the Claude Code plugin with Claude Code\'s own command and drops Kvali\'s hooks', async () => {
+test('Turn on installs the Claude Code plugin with Claude Code\'s own command and keeps Kvali\'s hooks beside it', async () => {
   const home = tmpHome();
   const settings = path.join(home, '.claude', 'settings.json');
   writeText(settings, JSON.stringify({ model: 'opus', hooks: { Stop: [{ hooks: [{ type: 'command', command: 'say done' }] }] } }));
@@ -60,7 +60,8 @@ test('Turn on installs the Claude Code plugin with Claude Code\'s own command an
   assert.equal(r.claude, 'plugin');
   assert.deepEqual(fake.log().map((l) => l.split(' ').slice(0, 3).join(' ')), ['plugin validate ' + kvaliPluginDir(home), 'plugin marketplace add', 'plugin install kvali@kvali', 'plugin list --json'].map((x) => x.split(' ').slice(0, 3).join(' ')));
   assert.ok(existsSync(path.join(kvaliPluginDir(home), 'hooks', 'register.tsx')), 'the plugin is kept in ~/.kvali/claude-plugin');
-  assert.equal(await claudeHooksStatus(settings, 47821), 'not-installed', "Kvali's hooks are gone");
+  // For a Claude Code that cannot load the plugin (an older one in another editor reads the same settings).
+  assert.equal(await claudeHooksStatus(settings, 47821), 'installed', "Kvali's hooks stay beside the plugin");
   const s = JSON.parse(readFileSync(settings, 'utf8'));
   assert.equal(s.model, 'opus');
   assert.equal(s.hooks.Stop[0].hooks[0].command, 'say done', "the user's own hooks stay");
@@ -80,6 +81,7 @@ test('Turn on installs the Claude Code plugin with Claude Code\'s own command an
   assert.ok(!existsSync(kvaliPluginDir(home)));
   const after = JSON.parse(readFileSync(settings, 'utf8'));
   assert.deepEqual([after.enabledPlugins, after.extraKnownMarketplaces], [{}, {}]);
+  assert.equal(await claudeHooksStatus(settings, 47821), 'not-installed', "Turn off removes Kvali's hooks too");
   assert.equal(after.hooks.Stop[0].hooks[0].command, 'say done');
 });
 

@@ -5,5 +5,5 @@
     "moduleResolution": "Bundler",
     "types": ["node", "vscode"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts"]
 }

@@ -19,7 +19,7 @@ import { emptyTokens, progressOf } from '../model.ts';
 import { listDir, readTextSafe, statSafe } from '../util/fs.ts';
 import { JsonlTail } from '../util/jsonl.ts';
 import { contentText, firstLine, truncate } from '../util/text.ts';
-import { dayKey, parseTime } from '../util/time.ts';
+import { addTaskDone, addWork, dayKey, parseTime } from '../util/time.ts';
 
 type Msg = Record<string, any>;
 
@@ -218,12 +218,17 @@ export class GeminiCliAdapter implements Adapter {
     let updatedAt = 0;
     let lastActivity: Activity | undefined;
     let costUsd: number | undefined = 0;
+    let prevTs: number | undefined;
+    const todoStatusSeen = new Map<string, TaskItem['status']>();
 
     for (const m of msgs) {
       const ts = parseTime(m.timestamp) ?? 0;
       if (ts) {
         if (startedAt === undefined || ts < startedAt) startedAt = ts;
         if (ts > updatedAt) updatedAt = ts;
+        // Gemini's own messages close a stretch of its work; the person's do not.
+        if (m.type === 'gemini') addWork(daily, prevTs, ts);
+        prevTs = Math.max(prevTs ?? 0, ts);
       }
       if (m.type === 'user' && !title) {
         const text = contentText(m.content);
@@ -261,6 +266,11 @@ export class GeminiCliAdapter implements Adapter {
             title: String(todo?.description ?? ''),
             status: todoStatus(todo?.status),
           }));
+          for (const t of tasks) {
+            const before = todoStatusSeen.get(t.title);
+            if (t.status === 'completed' && before !== undefined && before !== 'completed' && ts) addTaskDone(daily, ts);
+            todoStatusSeen.set(t.title, t.status);
+          }
         }
       }
     }
@@ -324,6 +334,7 @@ export class GeminiCliAdapter implements Adapter {
       costUsd,
       daily,
       context: context !== undefined ? { used: context, window: 1_048_576 } : undefined,
+      host: 'terminal',
       sources: [st.file],
     };
     st.cached = session;

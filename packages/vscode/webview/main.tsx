@@ -3,17 +3,22 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import {
   STATUS_LABEL,
   currentTask,
+  fmtAbout,
   fmtAgo,
+  fmtClock,
   fmtDuration,
+  fmtEta,
   fmtTokens,
   fmtUsd,
   groupByProject,
   pathWithin,
+  planEta,
   progressOf,
   qrMatrix,
   sessionTodayTokens,
   sessionTokens,
   todayUsage,
+  type AgentLimits,
   type AgentSession,
   type Progress,
   type ProjectGroup,
@@ -33,9 +38,11 @@ interface UiState {
 }
 
 function shortModel(model: string): string {
-  const m = /claude-(fable|mythos|opus|sonnet|haiku)-(\d+)(?:-(\d{1,2}))?(?=-|$|\[)/i.exec(model);
+  // `claude-opus-5-5`, `claude-sonnet-4.5`, `anthropic/claude-opus-4.8-fast` → "opus 5.5", "sonnet 4.5", "opus 4.8"
+  const m = /claude-(fable|mythos|opus|sonnet|haiku)-(\d+)(?:[-.](\d{1,2}))?(?=[-.]|$|\[)/i.exec(model);
   if (m) return `${m[1].toLowerCase()} ${m[2]}${m[3] ? `.${m[3]}` : ''}`;
-  return model.length > 22 ? `${model.slice(0, 21)}…` : model;
+  const plain = model.replace(/^[\w-]+\//, '');
+  return plain.length > 22 ? `${plain.slice(0, 21)}…` : plain;
 }
 
 function tokenTitle(s: AgentSession): string {
@@ -66,7 +73,7 @@ function Meter({ value, label }: { value: number; label: string }) {
   );
 }
 
-function ProgressBar({ p, moving }: { p: Progress; moving: boolean }) {
+function ProgressBar({ p, moving, eta, typicalMs }: { p: Progress; moving: boolean; eta?: number; typicalMs?: number }) {
   const rest = p.total - p.done - p.inProgress;
   return (
     <div class="progress">
@@ -79,7 +86,14 @@ function ProgressBar({ p, moving }: { p: Progress; moving: boolean }) {
         <strong>
           {p.done}/{p.total}
         </strong>
-        <span class="muted"> · {p.percent}%</span>
+        {eta !== undefined ? (
+          <span class="muted eta" title={`${p.percent}% done. At this plan's pace: its finished steps took about ${fmtDuration(typicalMs ?? 0)} each.`}>
+            {' '}
+            · {fmtEta(eta)}
+          </span>
+        ) : (
+          <span class="muted"> · {p.percent}%</span>
+        )}
       </span>
     </div>
   );
@@ -119,6 +133,21 @@ function NoPlanBar({ s, now, autoPlans }: { s: AgentSession; now: number; autoPl
 
 const QUIET_WARN_MS = 5 * 60_000;
 
+/** The agent repeats an action that fails the same way: it may need a hint. */
+function LoopLine({ loop, now }: { loop: NonNullable<AgentSession['loop']>; now: number }) {
+  const what = loop.detail ?? loop.label;
+  const cut = what.length > 48 ? `${what.slice(0, 47)}…` : what;
+  return (
+    <div
+      class="live warn loop"
+      title={`The same action failed ${loop.count} times in a row${loop.sameError ? ' with the same error each time' : ''}. Agents sometimes need a hint to get out of a loop.`}
+    >
+      ⟳ Going in circles: “{cut}” failed {loop.count}× · {fmtDuration(now - loop.since)}
+      {loop.tokens ? ` · ${fmtTokens(loop.tokens)} tokens` : ''}
+    </div>
+  );
+}
+
 /** The current step: its own progress bar (elapsed vs. this plan's typical step), liveness, and the latest actions. */
 function NowPanel({ s, step, now }: { s: AgentSession; step: TaskItem | undefined; now: number }) {
   const cur = s.current;
@@ -128,6 +157,7 @@ function NowPanel({ s, step, now }: { s: AgentSession; step: TaskItem | undefine
   return (
     <div class="now">
       {step && <div class="step">{step.activeTitle ?? step.title}</div>}
+      {s.loop && <LoopLine loop={s.loop} now={now} />}
       {cur &&
         (ratio !== undefined ? (
           <div class="stepbar">
@@ -270,6 +300,9 @@ function Card({
   // Stale cards say it in the liveness line instead ("No output for 45m and nothing is running").
   const showDetail = !!s.statusDetail && !working && s.status !== 'stale';
   const canResume = (s.agent === 'claude-code' || s.agent === 'codex') && !working && s.status !== 'waiting';
+  // Kvali can take you to agents that run in a terminal or an editor panel.
+  const canGoTo = s.agent !== 'progress-file' && s.agent !== 'antigravity' && s.host !== 'app';
+  const transcript = s.sources[0] && !/\.db$/i.test(s.sources[0]) ? s.sources[0] : undefined;
 
   return (
     <article class={`card s-${s.status} agent-${s.agent}`}>
@@ -291,7 +324,11 @@ function Card({
 
       {showDetail && <div class={`detail d-${s.status}`}>{s.statusDetail}</div>}
 
-      {p.total > 0 ? <ProgressBar p={p} moving={working} /> : working && <NoPlanBar s={s} now={now} autoPlans={autoPlans} />}
+      {p.total > 0 ? (
+        <ProgressBar p={p} moving={working} eta={working ? planEta(s, now) : undefined} typicalMs={s.current?.typicalMs} />
+      ) : (
+        working && <NoPlanBar s={s} now={now} autoPlans={autoPlans} />
+      )}
 
       {(working || s.status === 'stale') && <NowPanel s={s} step={step} now={now} />}
 
@@ -336,9 +373,16 @@ function Card({
             Resume
           </button>
         )}
-        <button class="link" title={s.sources[0]} onClick={() => post({ type: 'open', key: s.key })}>
-          Open
-        </button>
+        {transcript && (
+          <button class="link" title={`Open the transcript: ${transcript}`} onClick={() => post({ type: 'open', key: s.key })}>
+            Transcript
+          </button>
+        )}
+        {canGoTo && (
+          <button class="link go" title="Go to the terminal or panel where this agent runs" onClick={() => post({ type: 'goto', key: s.key })}>
+            Go to agent
+          </button>
+        )}
       </div>
 
       {expanded && <TaskList tasks={s.tasks} />}
@@ -400,28 +444,40 @@ function Group({
   );
 }
 
-function Limits({ sessions, now }: { sessions: AgentSession[]; now: number }) {
-  const latest = new Map<string, AgentSession>();
-  for (const s of sessions) {
-    if (!s.rateLimits?.length) continue;
-    const cur = latest.get(s.agent);
-    if (!cur || s.updatedAt > cur.updatedAt) latest.set(s.agent, s);
-  }
-  if (!latest.size) return null;
+/** One line per usage window of a subscription, account-wide, and when the recent pace uses it up. */
+function Limits({ limits, now }: { limits: AgentLimits[] | undefined; now: number }) {
+  if (!limits?.length) return null;
   return (
     <section class="limits" aria-label="Plan limits">
-      {[...latest.values()].flatMap((s) =>
-        s.rateLimits!.map((r) => (
-          <div class={`limit agent-${s.agent}`} key={`${s.agent}-${r.label}`}>
-            <span class="limit-name">
-              <i class="dot" />
-              {s.agentLabel} · {r.label}
-            </span>
-            <Meter value={r.usedPercent} label={`${s.agentLabel} ${r.label} limit used`} />
-            <span class="pct">{Math.round(r.usedPercent)}%</span>
-            {r.resetsAt && r.resetsAt > now && <span class="muted small">resets in {fmtDuration(r.resetsAt - now)}</span>}
-          </div>
-        )),
+      {limits.flatMap((l) =>
+        l.windows.map((w) => {
+          const out = w.runsOutAt;
+          const resets = w.resetsAt !== undefined && w.resetsAt > now ? w.resetsAt : undefined;
+          const why =
+            out === undefined
+              ? undefined
+              : out <= now
+                ? `This window is used up${resets ? `. It resets at ${fmtClock(resets)}` : ''}.`
+                : `At the pace of the last hour this window is used up around ${fmtClock(out)}${resets ? `, ${fmtDuration(resets - out)} before it resets at ${fmtClock(resets)}` : ''}.`;
+          return (
+            <div class={`limit agent-${l.agent}${out !== undefined ? ' running-out' : ''}`} key={`${l.agent}-${w.label}`} title={why}>
+              <span class="limit-name">
+                <i class="dot" />
+                {l.agentLabel} · {w.label}
+              </span>
+              <Meter value={w.usedPercent} label={`${l.agentLabel} ${w.label} limit used`} />
+              <span class="pct">{Math.round(w.usedPercent)}%</span>
+              {out !== undefined ? (
+                <span class="small warn limit-note">
+                  {out <= now ? 'Used up' : `Runs out in ${fmtAbout(out - now)}`}
+                  {resets ? <span class="muted"> · resets in {fmtDuration(resets - now)}</span> : null}
+                </span>
+              ) : (
+                resets && <span class="muted small limit-note">resets in {fmtDuration(resets - now)}</span>
+              )}
+            </div>
+          );
+        }),
       )}
     </section>
   );
@@ -452,10 +508,10 @@ function Empty({ hours, scope }: { hours: number; scope: Scope }) {
         No agent activity in the last {hours}h{scope === 'workspace' ? ' in this workspace' : ''}.
       </p>
       <p>
-        Start <b>Claude Code</b>, <b>Codex</b>, <b>Gemini CLI</b> or an <b>Antigravity</b> agent. Sessions, their plan and token usage appear here
-        automatically.
+        Start <b>Claude Code</b>, <b>Codex</b>, <b>Gemini CLI</b>, <b>Antigravity</b>, <b>Copilot</b>, <b>Cline</b>, <b>Roo Code</b>, <b>Kilo Code</b> or{' '}
+        <b>OpenCode</b>. Sessions, their plan and token usage appear here automatically.
       </p>
-      <p>Using Cursor, Copilot, Windsurf or another agent? Ask it to report progress through AGENTS.md:</p>
+      <p>Using Cursor, Windsurf or another agent? Ask it to report progress through AGENTS.md:</p>
       <button class="btn" onClick={() => post({ type: 'command', command: 'kvali.addProgressProtocol' })}>
         Add progress protocol
       </button>
@@ -497,7 +553,8 @@ const PHONE_CHOICES: { event: string; label: string; hint?: string }[] = [
   { event: 'steps', label: 'Each finished step of the plan', hint: 'silent' },
   { event: 'actions', label: 'Every action, live', hint: 'silent, at most twice a minute' },
   { event: 'error', label: 'An error stopped the agent' },
-  { event: 'stuck', label: 'The agent went silent or stopped responding' },
+  { event: 'stuck', label: 'The agent went silent, stopped responding or goes in circles' },
+  { event: 'limits', label: 'A plan limit will run out before it resets' },
 ];
 const DONE_AFTER: [number, string][] = [
   [0, 'any length'],
@@ -520,23 +577,64 @@ function PhoneCard({ phone }: { phone: PhoneView }) {
       <p class="setup-title">
         <b>Notifications on your phone</b>
       </p>
-      <ol>
-        <li>
-          Install the free <b>ntfy</b> app (iPhone or Android).
-        </li>
-        <li>
-          <b>Android:</b> scan the code. <b>iPhone:</b> in ntfy tap <b>+</b> and enter the topic below{self ? <> with server <code>{phone.server}</code></> : null}.
-        </li>
-      </ol>
-      <div class="qr-wrap">
-        <Qr text={phone.link} />
+      {phone.topic && phone.link ? (
+        <>
+          <ol>
+            <li>
+              Install the free <b>ntfy</b> app (iPhone or Android).
+            </li>
+            <li>
+              <b>Android:</b> scan the code. <b>iPhone:</b> in ntfy tap <b>+</b> and enter the topic below{self ? <> with server <code>{phone.server}</code></> : null}.
+            </li>
+          </ol>
+          <div class="qr-wrap">
+            <Qr text={phone.link} />
+          </div>
+          <p class="topic">
+            <code>{phone.topic}</code>{' '}
+            <button class="link" onClick={() => post({ type: 'copy', text: phone.topic! })}>
+              Copy
+            </button>
+          </p>
+        </>
+      ) : (
+        <p class="muted small">
+          The ntfy phone app is not set up.{' '}
+          <button class="link" onClick={() => post({ type: 'command', command: 'kvali.phoneSetup' })}>
+            Add ntfy
+          </button>
+        </p>
+      )}
+      <div class="channels" aria-label="Also notify through">
+        <span class="channel">
+          {phone.telegram ? (
+            <>
+              <b>Telegram</b> <span class="muted">· {phone.telegram.bot ? `@${phone.telegram.bot}` : 'connected'}</span>{' '}
+              <button class="link" onClick={() => post({ type: 'command', command: 'kvali.telegramOff' })}>
+                Disconnect
+              </button>
+            </>
+          ) : (
+            <button class="link" title="A bot of your own writes to you in Telegram" onClick={() => post({ type: 'command', command: 'kvali.telegramSetup' })}>
+              + Telegram
+            </button>
+          )}
+        </span>
+        <span class="channel">
+          {phone.discord ? (
+            <>
+              <b>Discord</b> <span class="muted">· a channel's webhook</span>{' '}
+              <button class="link" onClick={() => post({ type: 'command', command: 'kvali.discordOff' })}>
+                Disconnect
+              </button>
+            </>
+          ) : (
+            <button class="link" title="Posts in a Discord channel of yours, through its webhook" onClick={() => post({ type: 'command', command: 'kvali.discordSetup' })}>
+              + Discord
+            </button>
+          )}
+        </span>
       </div>
-      <p class="topic">
-        <code>{phone.topic}</code>{' '}
-        <button class="link" onClick={() => post({ type: 'copy', text: phone.topic })}>
-          Copy
-        </button>
-      </p>
       <fieldset class="phone-events">
         <legend>Notify me when</legend>
         {PHONE_CHOICES.map((c) => (
@@ -562,7 +660,8 @@ function PhoneCard({ phone }: { phone: PhoneView }) {
         ))}
       </fieldset>
       <p class="muted small">
-        Steps and actions share one silent notification per task, which its end replaces (on an iPhone each update is listed). The topic name is the key: keep it to yourself.
+        Steps and actions share one silent notification per task, which its end replaces (on an iPhone each update is listed).
+        {phone.topic ? ' The topic name is the key: keep it to yourself.' : ''}
         {phone.details ? ' Notifications name the project and the step; never code or prompts.' : ' Notifications leave out project and step names.'}
       </p>
       <div class="setup-actions">
@@ -587,9 +686,12 @@ function PhoneRow({ phone }: { phone: PhoneView | undefined }) {
       <PhoneIcon />
       {phone ? (
         <>
-          <span class="muted">Phone alerts on</span>
+          <span class="muted">
+            Phone alerts on
+            {phone.telegram || phone.discord ? ` · ${[phone.topic ? 'ntfy' : '', phone.telegram ? 'Telegram' : '', phone.discord ? 'Discord' : ''].filter(Boolean).join(', ')}` : ''}
+          </span>
           <button class="link" onClick={() => post({ type: 'showPhoneCard' })}>
-            Show QR code
+            {phone.topic ? 'Show QR code' : 'Settings'}
           </button>
         </>
       ) : (
@@ -644,6 +746,9 @@ function App() {
             </>
           )}
         </div>
+        <button class="link share-link" title="Your agents' week as an image to share: counts only, no project names" onClick={() => post({ type: 'command', command: 'kvali.shareWeek' })}>
+          Share my week
+        </button>
         <div class="seg-toggle" role="group" aria-label="Scope">
           <button aria-pressed={st.scope === 'all'} onClick={() => post({ type: 'setScope', scope: 'all' })}>
             All
@@ -676,7 +781,7 @@ function App() {
       )}
       {st.phoneCard && st.phone ? <PhoneCard phone={st.phone} /> : <PhoneRow phone={st.phone} />}
       <Counts sessions={sessions} />
-      <Limits sessions={sessions} now={now} />
+      <Limits limits={st.snapshot.limits} now={now} />
 
       {groups.length === 0 ? <Empty hours={st.activeWindowHours} scope={st.scope} /> : groups.map((g) => <Group key={g.path ?? ''} g={g} now={now} ui={ui} setUi={setUi} showCost={st.showCost} autoPlans={autoPlans} />)}
 

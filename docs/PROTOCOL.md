@@ -2,7 +2,7 @@
 
 A tiny, agent-agnostic way for **any** coding agent to report progress: a markdown checklist in a known place. If an agent can edit files, it can speak this protocol. No SDK, no network, no tokens spent on tool calls.
 
-Kvali reads it natively for agents it has no adapter for (Cursor, GitHub Copilot, Windsurf, Cline, Aider, …). Agents that already have a built-in plan tool (Claude Code Tasks, Codex `update_plan`, Gemini CLI `write_todos`, Antigravity `task.md`) should keep using it; Kvali reads those directly.
+Kvali reads it natively for agents it has no adapter for (Cursor, Windsurf, Aider, …). Agents that already have a built-in plan tool (Claude Code Tasks, Codex `update_plan`, Gemini CLI `write_todos`, Antigravity `task.md`, Copilot `update_todo`, Cline's focus chain, Roo Code `update_todo_list`, OpenCode and Kilo Code `todowrite`) should keep using it; Kvali reads those directly.
 
 ## File location
 

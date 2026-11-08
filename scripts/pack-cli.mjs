@@ -32,7 +32,7 @@ await cp(path.join(ROOT, 'THIRD_PARTY_NOTICES.md'), path.join(OUT, 'THIRD_PARTY_
 const manifest = {
   name: src.name,
   version: src.version,
-  description: 'Live progress, tokens and phone alerts for AI coding agents (Claude Code, Codex, Gemini CLI, Antigravity), in your terminal.',
+  description: 'Live progress, time left, tokens, plan limits and phone alerts for AI coding agents (Claude Code, Codex, Gemini CLI, Antigravity, Copilot, Cline, Roo Code, Kilo Code, OpenCode), in your terminal.',
   license: 'MIT',
   author: 'Giorgi Khiladze (https://github.com/webGrandpa)',
   homepage: 'https://github.com/webGrandpa/kvali#readme',

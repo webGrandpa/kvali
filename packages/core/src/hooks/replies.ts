@@ -13,7 +13,8 @@ import type { LiveEvent } from './hub.ts';
 
 export const CLAUDE_PLAN_CONTEXT =
   'Progress tracking (Kvali): if this request takes more than two steps, start by creating a task list with TaskCreate ' +
-  '(or TodoWrite), keep exactly one task in_progress, and mark each task completed as soon as it is done. ' +
+  'or TodoWrite, whichever you have (if neither is in your tool list, load one with ToolSearch first), keep exactly ' +
+  'one task in_progress, and mark each task completed as soon as it is done. ' +
   'The user follows your progress from that list, so keep it current.';
 
 /** Whether Kvali's Claude Code plugin runs in a session: it writes a heartbeat file from its first moment. */

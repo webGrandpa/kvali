@@ -16,11 +16,13 @@ import path from 'node:path';
 import type { AdapterContext, Candidate } from '../adapter.ts';
 import { JsonlSessionAdapter, staleness } from '../adapter.ts';
 import type { Activity, AgentSession, DailyUsage, RateLimitWindow, TaskItem, TaskStatus, TokenUsage } from '../model.ts';
-import { progressOf } from '../model.ts';
+import { progressOf, totalTokens } from '../model.ts';
 import { findGitRoot, listDir, statSafe } from '../util/fs.ts';
 import { contentText, firstLine, summarizeCommand, truncate } from '../util/text.ts';
 import { TaskTimer } from '../util/task-timer.ts';
-import { dayKey, parseTime } from '../util/time.ts';
+import { addTaskDone, addWork, dayKey, parseTime } from '../util/time.ts';
+import { LimitBook, type AgentLimits } from '../limits.ts';
+import { LoopWatch, loopKey } from '../util/loop-watch.ts';
 
 interface CodexState {
   file: string;
@@ -29,6 +31,8 @@ interface CodexState {
   model?: string;
   isSubagent: boolean;
   version?: string;
+  /** Who started it: `codex_cli_rs` (the TUI), `codex_vscode`, `codex_exec`, … */
+  originator?: string;
   title?: string;
   startedAt?: number;
   updatedAt: number;
@@ -50,6 +54,34 @@ interface CodexState {
   turnStartedAt?: number;
   timer: TaskTimer;
   recent: Activity[];
+  /** Actions that keep failing the same way. */
+  loops: LoopWatch;
+  /** The previous record's time, for the day's work time. */
+  lastRecordAt?: number;
+}
+
+/**
+ * The failure in a tool's output, or undefined when it worked. Shell output arrives as JSON
+ * (`{ output, metadata: { exit_code } }`) or as text that states the exit code.
+ */
+export function codexFailure(output: unknown): string | undefined {
+  let text = typeof output === 'string' ? output : output && typeof output === 'object' ? JSON.stringify(output) : '';
+  if (!text) return undefined;
+  let code: number | undefined;
+  try {
+    const j = JSON.parse(text) as { output?: unknown; metadata?: { exit_code?: unknown } };
+    if (j && typeof j === 'object' && typeof j.metadata?.exit_code === 'number') {
+      code = j.metadata.exit_code;
+      if (typeof j.output === 'string') text = j.output;
+    }
+  } catch {
+    // text output
+  }
+  if (code === undefined) {
+    const m = /^(?:Exit code:|Process exited with code)\s*(-?\d+)/m.exec(text);
+    if (m) code = Number(m[1]);
+  }
+  return code !== undefined && code !== 0 ? text : undefined;
 }
 
 function planStatus(s: unknown): TaskStatus {
@@ -92,6 +124,14 @@ function describeCodexCall(name: string, args: Record<string, any>, at: number):
 }
 
 export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
+  /** The account's plan windows, from every session's readings. */
+  private readonly limitBook = new LimitBook();
+
+  limits(ctx: AdapterContext): AgentLimits | undefined {
+    const windows = this.limitBook.windows(ctx.now());
+    return windows.length ? { agent: this.id, agentLabel: this.label, windows } : undefined;
+  }
+
   readonly id = 'codex';
   readonly label = 'Codex';
 
@@ -121,6 +161,7 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
 
   protected createState(file: string): CodexState {
     const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i.exec(file);
+    const daily: Record<string, DailyUsage> = {};
     return {
       file,
       id: m ? m[1] : path.basename(file, '.jsonl'),
@@ -128,15 +169,16 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
       updatedAt: 0,
       prevTotal: 0,
       prevCost: 0,
-      daily: {},
+      daily,
       tasks: [],
       open: new Map(),
       phase: 'idle',
       phaseAt: 0,
       turns: 0,
       turnSteps: 0,
-      timer: new TaskTimer(),
+      timer: new TaskTimer((at) => addTaskDone(daily, at)),
       recent: [],
+      loops: new LoopWatch(),
     };
   }
 
@@ -150,12 +192,20 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
     }
     const p = o.payload;
     if (!p || typeof p !== 'object') return;
+    if (ts) {
+      // The agent's own items (calls, their output, reasoning, replies) close a stretch of its work.
+      const agentWrote = o.type === 'response_item' && !(p.type === 'message' && p.role === 'user');
+      if (agentWrote) addWork(st.daily, st.lastRecordAt, ts);
+      if (st.lastRecordAt === undefined || ts > st.lastRecordAt) st.lastRecordAt = ts;
+    }
 
     switch (o.type) {
       case 'session_meta': {
         if (typeof p.id === 'string') st.id = p.id;
         if (typeof p.cwd === 'string') st.cwd = p.cwd;
         if (typeof p.cli_version === 'string') st.version = p.cli_version;
+        if (typeof p.originator === 'string') st.originator = p.originator;
+        else if (typeof p.source === 'string') st.originator = p.source;
         if (p.parent_thread_id || p.agent_role || p.agent_nickname) st.isSubagent = true;
         const started = parseTime(p.timestamp);
         if (started) st.startedAt = Math.min(st.startedAt ?? started, started);
@@ -197,6 +247,7 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
         st.phase = 'interrupted';
         st.phaseAt = ts;
         st.open.clear();
+        st.loops.reset();
         return;
       case 'error':
         st.phase = 'error';
@@ -206,6 +257,7 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
       case 'user_message':
         if (typeof p.message === 'string' && p.message.trim()) {
           st.title ??= firstLine(p.message, 100);
+          st.loops.reset();
           if (st.phase !== 'working') {
             st.phase = 'working';
             st.phaseAt = ts;
@@ -279,7 +331,10 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
           windowMinutes: typeof w.window_minutes === 'number' ? w.window_minutes : undefined,
         });
       }
-      if (windows.length) st.rateLimits = windows;
+      if (windows.length) {
+        st.rateLimits = windows;
+        for (const w of windows) this.limitBook.add(w, ts);
+      }
     }
   }
 
@@ -324,7 +379,10 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
       case 'function_call_output':
       case 'custom_tool_call_output': {
         const done = typeof p.call_id === 'string' ? st.open.get(p.call_id) : undefined;
-        if (done) done.endedAt = ts;
+        if (done) {
+          done.endedAt = ts;
+          st.loops.observe(loopKey(done), done, codexFailure(p.output), ts, st.tokens ? totalTokens(st.tokens) : undefined);
+        }
         if (typeof p.call_id === 'string') st.open.delete(p.call_id);
         st.activity = { kind: 'thinking', label: 'Thinking', startedAt: ts };
         return;
@@ -384,6 +442,7 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
       cwd: st.cwd,
       model: st.model,
       agentVersion: st.version,
+      host: st.originator === undefined ? undefined : /vscode|ide/.test(st.originator) ? 'editor' : /exec|mcp|sdk/.test(st.originator) ? 'app' : 'terminal',
       status,
       statusDetail: detail,
       startedAt: st.startedAt,
@@ -398,8 +457,22 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
       turns: st.turns,
       turn: st.turnStartedAt !== undefined ? { steps: st.turnSteps, startedAt: st.turnStartedAt } : undefined,
       current: status === 'working' || status === 'stale' ? st.timer.current(st.tasks) : undefined,
+      loop: loopOf(st, status, ctx.now()),
       recent: st.recent.slice(0, 5),
       sources: [st.file],
     };
   }
+}
+
+function loopOf(st: CodexState, status: AgentSession['status'], now: number): AgentSession['loop'] {
+  const l = status === 'working' || status === 'stale' ? st.loops.current(now) : undefined;
+  if (!l) return undefined;
+  return {
+    label: l.label,
+    detail: l.detail,
+    count: l.count,
+    sameError: l.sameError,
+    since: l.since,
+    tokens: l.tokensAtStart !== undefined && st.tokens ? totalTokens(st.tokens) - l.tokensAtStart : undefined,
+  };
 }

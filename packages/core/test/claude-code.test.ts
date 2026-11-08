@@ -277,6 +277,30 @@ test('Claude Code: the Kvali plugin heartbeat gives exact liveness, and its sile
   assert.notEqual(s.status, 'stale');
 });
 
+test('Claude Code: where the plugin runs, the hooks kept beside it are not heard; without it they are', async () => {
+  const home = tmpHome();
+  const clock = new Clock('2026-10-30T10:00:00.000Z');
+  const file = path.join(home, '.claude', 'projects', '-work-shop', `${SID}.jsonl`);
+  writeJsonl(file, [
+    { ...base(clock, 0), type: 'user', message: { role: 'user', content: 'Refactor the checkout' } },
+    ...assistant(clock, 1_000, 'a', [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: '/work/shop/a.ts' } }], 'tool_use'),
+    toolResult(clock, 2_000, 'tu_1', 'ok'),
+  ]);
+  clock.advance(10_000);
+  // A hook's idle notification says the session waits for the person.
+  const hookFile = path.join(home, '.kvali', 'live', 'claude-code', `${SID}.json`);
+  writeText(hookFile, JSON.stringify({ event: 'Notification', notificationType: 'permission_prompt', message: 'Claude needs your permission to use Bash', at: clock.t }));
+  const engine = engineFor(new ClaudeCodeAdapter(), home, clock);
+  let s = await only(engine);
+  assert.equal(s.status, 'waiting', 'without the plugin the hooks are what Kvali hears');
+
+  // The plugin runs in the session and says the model is thinking: the hook's event is not heard.
+  writeText(path.join(home, '.kvali', 'live', 'claude-code', `${SID}.mod.json`), JSON.stringify({ v: 1, agent: 'claude-code', sessionId: SID, at: clock.t, phase: 'thinking', since: clock.t - 5_000 }));
+  s = await only(engine);
+  assert.equal(s.status, 'working');
+  assert.equal(s.pulse?.phase, 'thinking');
+});
+
 test('Claude Code: a session woken after its turn ended starts a new turn, timed from what woke it', async () => {
   const home = tmpHome();
   const clock = new Clock('2026-10-30T10:00:00.000Z');

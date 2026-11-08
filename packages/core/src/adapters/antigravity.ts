@@ -15,14 +15,14 @@
  */
 import path from 'node:path';
 import type { Adapter, AdapterContext } from '../adapter.ts';
-import type { Activity, AgentSession, TaskItem } from '../model.ts';
+import type { Activity, AgentSession, DailyUsage, TaskItem } from '../model.ts';
 import { progressOf } from '../model.ts';
 import { parseChecklist } from '../util/checklist.ts';
 import { findGitRoot, isWithin, listDir, readJsonSafe, readTextSafe, statSafe } from '../util/fs.ts';
 import { JsonlTail } from '../util/jsonl.ts';
 import { firstLine, truncate } from '../util/text.ts';
 import { TaskTimer } from '../util/task-timer.ts';
-import { parseTime } from '../util/time.ts';
+import { addTaskDone, addWork, parseTime } from '../util/time.ts';
 
 const ASK_TOOLS = new Set(['ask_permission', 'ask_question', 'request_feedback', 'notify_user']);
 const PATH_ARGS: Record<string, number> = {
@@ -66,6 +66,9 @@ interface AgState {
   turnStartedAt?: number;
   timer: TaskTimer;
   recent: Activity[];
+  /** Work time and finished steps per day (Antigravity records no tokens). */
+  daily: Record<string, DailyUsage>;
+  lastStepAt?: number;
 }
 
 function decodeArg(v: unknown): unknown {
@@ -187,6 +190,7 @@ export class AntigravityAdapter implements Adapter {
   }
 
   private blank(id: string, dir: string): AgState {
+    const daily: Record<string, DailyUsage> = {};
     return {
       id,
       dir,
@@ -196,8 +200,9 @@ export class AntigravityAdapter implements Adapter {
       projectVotesAt: -1,
       steps: 0,
       turnSteps: 0,
-      timer: new TaskTimer(),
+      timer: new TaskTimer((at) => addTaskDone(daily, at)),
       recent: [],
+      daily,
     };
   }
 
@@ -228,11 +233,14 @@ export class AntigravityAdapter implements Adapter {
     const o = rec as Record<string, any>;
     const at = parseTime(o.created_at) ?? st.updatedAt;
     st.steps += 1;
+    const type = String(o.type ?? '');
     if (at) {
       if (st.startedAt === undefined || at < st.startedAt) st.startedAt = at;
       if (at > st.updatedAt) st.updatedAt = at;
+      // The agent's own steps close a stretch of its work; the person's input does not.
+      if (type !== 'USER_INPUT') addWork(st.daily, st.lastStepAt, at);
+      if (st.lastStepAt === undefined || at > st.lastStepAt) st.lastStepAt = at;
     }
-    const type = String(o.type ?? '');
     const status = String(o.status ?? '');
     const source = String(o.source ?? '');
     const tools: string[] = [];
@@ -389,6 +397,7 @@ export class AntigravityAdapter implements Adapter {
       updatedAt: st.updatedAt,
       tasks,
       activity,
+      daily: Object.keys(st.daily).length ? st.daily : undefined,
       sources: [path.join(st.dir, 'task.md'), st.tail.path],
     };
   }

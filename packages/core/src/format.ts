@@ -3,7 +3,7 @@
  * Pure functions with no Node imports, so the webview can bundle them too.
  */
 import type { AgentSession, SessionStatus } from './model.ts';
-import { totalTokens } from './model.ts';
+import { progressOf, totalTokens } from './model.ts';
 
 export function fmtTokens(n: number | undefined): string {
   if (n === undefined || !Number.isFinite(n)) return '–';
@@ -32,6 +32,41 @@ export function fmtDuration(ms: number): string {
   const h = Math.floor(m / 60);
   if (h < 24) return `${h}h ${String(m % 60).padStart(2, '0')}m`;
   return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+/**
+ * How long the rest of the plan should take at the plan's own pace: the typical time of its
+ * finished steps for each step left, less the time already spent on the current one.
+ * `undefined` until a step has finished to measure by, and when nothing is left.
+ */
+export function planEta(s: Pick<AgentSession, 'tasks' | 'current'>, now: number): number | undefined {
+  const typical = s.current?.typicalMs;
+  if (!typical || typical <= 0) return undefined;
+  const p = progressOf(s.tasks);
+  const left = p.total - p.done;
+  if (p.total === 0 || left <= 0) return undefined;
+  const spent = s.current ? Math.max(0, now - s.current.startedAt) : 0;
+  return Math.max(0, typical - spent) + (left - 1) * typical;
+}
+
+/** A time of day in the computer's own locale and time zone: "17:40" or "5:40 PM". */
+export function fmtClock(ms: number): string {
+  return new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+/** A forecast, to the minute: "~30m", "~1h 05m". */
+export function fmtAbout(ms: number): string {
+  const m = Math.max(1, Math.round(ms / 60_000));
+  return m < 60 ? `~${m}m` : `~${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+}
+
+/** "~20m left", "~1h 10m left", "under a minute left". */
+export function fmtEta(ms: number): string {
+  if (ms < 60_000) return 'under a minute left';
+  const m = Math.round(ms / 60_000);
+  if (m < 60) return `~${m}m left`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `~${h}h ${m % 60}m left` : `~${h}h left`;
 }
 
 export function fmtAgo(at: number, now: number): string {

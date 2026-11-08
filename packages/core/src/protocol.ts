@@ -29,14 +29,14 @@ For any task that takes more than two steps, keep your plan visible so the user 
 `;
 }
 
-export const PLAN_RULE_MARKER = '<!-- kvali:plan-rule v1 -->';
+export const PLAN_RULE_MARKER = '<!-- kvali:plan-rule v2 -->';
 
 /** A short global instruction for agents that have a built-in plan tool. */
 export function planRuleSnippet(): string {
   return `${PLAN_RULE_MARKER}
 ## Keep a visible plan
 
-For any task that takes more than two steps, create a task list with your built-in plan tool before you start (Claude Code: TaskCreate/TaskUpdate or TodoWrite; Codex: update_plan; Gemini CLI: write_todos; Antigravity: task.md), keep exactly one item in progress, and mark each item done as soon as it is finished. The user follows your progress from this list.
+For any task that takes more than two steps, create a task list with your built-in plan tool before you start (Claude Code: TaskCreate/TaskUpdate or TodoWrite, whichever it has, loaded with ToolSearch when not in your tool list; Codex: update_plan; Gemini CLI: write_todos; Antigravity: task.md), keep exactly one item in progress, and mark each item done as soon as it is finished. The user follows your progress from this list.
 <!-- /kvali:plan-rule -->
 `;
 }

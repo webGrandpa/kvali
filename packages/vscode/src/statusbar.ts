@@ -2,9 +2,14 @@ import * as vscode from 'vscode';
 import {
   STATUS_LABEL,
   currentTask,
+  fmtAbout,
+  fmtClock,
+  fmtEta,
   fmtTokens,
   fmtUsd,
   pathWithin,
+  planEta,
+  pressingWindow,
   progressOf,
   projectName,
   sessionTokens,
@@ -18,20 +23,28 @@ function short(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1).trimEnd()}…`;
 }
 
-/** The single status bar item: the most relevant agent of this workspace, or any agent that needs you. */
+/**
+ * The status bar: the most relevant agent of this workspace (or any agent that needs you), and,
+ * only while a plan's usage window runs low, that window.
+ */
 export class StatusBar {
   private readonly item = vscode.window.createStatusBarItem('kvali.status', vscode.StatusBarAlignment.Left, -10);
+  private readonly limitItem = vscode.window.createStatusBarItem('kvali.limits', vscode.StatusBarAlignment.Left, -11);
 
   constructor() {
     this.item.name = 'Kvali';
     this.item.command = 'kvali.show';
+    this.limitItem.name = 'Kvali: plan limits';
+    this.limitItem.command = 'kvali.show';
   }
 
   update(snapshot: Snapshot, roots: readonly string[], enabled: boolean, showCost: boolean): void {
     if (!enabled) {
       this.item.hide();
+      this.limitItem.hide();
       return;
     }
+    this.updateLimits(snapshot);
     const now = Date.now();
     const inWs = (s: AgentSession) => roots.some((r) => pathWithin(s.projectPath, r));
     const ws = snapshot.sessions.filter(inWs);
@@ -50,7 +63,8 @@ export class StatusBar {
       const step = currentTask(s.tasks);
       const label = step?.activeTitle ?? step?.title ?? s.activity?.label;
       const tok = sessionTokens(s);
-      const parts = [p.total ? `${p.done}/${p.total} · ${p.percent}%` : s.turn ? `${s.agentLabel} · ${s.turn.steps} steps` : s.agentLabel];
+      const eta = planEta(s, now);
+      const parts = [p.total ? `${p.done}/${p.total} · ${eta !== undefined ? fmtEta(eta) : `${p.percent}%`}` : s.turn ? `${s.agentLabel} · ${s.turn.steps} steps` : s.agentLabel];
       if (label) parts.push(short(label, 32));
       if (tok) parts.push(fmtTokens(tok));
       if (working.length > 1) parts.push(`+${working.length - 1}`);
@@ -60,7 +74,12 @@ export class StatusBar {
       const stuck = s.pulse
         ? s.pulse.phase === 'stalled' || s.pulse.phase === 'gone'
         : (!!s.trouble && now - s.trouble.at < 15 * 60_000) || (!running && quiet > 5 * 60_000);
-      this.item.text = `${stuck ? '$(warning)' : '$(sync~spin)'} ${parts.join(' · ')}${stuck ? ` · quiet ${Math.round(quiet / 60_000)}m` : ''}`;
+      if (s.loop) {
+        this.item.text = `$(warning) ${parts.join(' · ')} · going in circles (${s.loop.count}×)`;
+        this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+      } else {
+        this.item.text = `${stuck ? '$(warning)' : '$(sync~spin)'} ${parts.join(' · ')}${stuck ? ` · quiet ${Math.round(quiet / 60_000)}m` : ''}`;
+      }
     } else if (ws.some((s) => s.pulse?.phase === 'gone')) {
       const s = ws.find((x) => x.pulse?.phase === 'gone')!;
       this.item.text = `$(warning) ${s.agentLabel} stopped responding`;
@@ -84,16 +103,17 @@ export class StatusBar {
     const md = new vscode.MarkdownString(undefined, true);
     md.supportThemeIcons = true;
     if (!sessions.length) {
-      md.appendMarkdown('**Kvali** — no agent sessions yet. Start Claude Code, Codex, Gemini CLI or Antigravity.');
+      md.appendMarkdown('**Kvali** — no agent sessions yet. Start Claude Code, Codex, Gemini CLI, Antigravity, Copilot, Cline, Roo Code, Kilo Code or OpenCode.');
       return md;
     }
     md.appendMarkdown(`**Kvali** — ${workspace ? 'this workspace' : 'recent sessions'}\n\n`);
     for (const s of sessions.slice(0, 6)) {
       const p = progressOf(s.tasks);
       const tok = sessionTokens(s);
+      const eta = s.status === 'working' ? planEta(s, Date.now()) : undefined;
       const bits = [
         STATUS_LABEL[s.status],
-        p.total ? `${p.done}/${p.total} tasks (${p.percent}%)` : undefined,
+        p.total ? `${p.done}/${p.total} tasks (${p.percent}%)${eta !== undefined ? `, ${fmtEta(eta)}` : ''}` : undefined,
         tok ? `${fmtTokens(tok)} tokens` : undefined,
         showCost && s.costUsd !== undefined ? `API value ${fmtUsd(s.costUsd)}` : undefined,
       ].filter(Boolean);
@@ -104,7 +124,36 @@ export class StatusBar {
     return md;
   }
 
+  /** Shown while a window runs out before it resets, or is 80% used; hidden otherwise. */
+  private updateLimits(snapshot: Snapshot): void {
+    const now = Date.now();
+    const p = pressingWindow(snapshot.limits);
+    const w = p?.window;
+    const out = w?.runsOutAt;
+    if (!p || !w || (out === undefined && w.usedPercent < 80)) {
+      this.limitItem.hide();
+      return;
+    }
+    const who = p.limits.agentLabel.split(' ')[0];
+    const pct = Math.round(w.usedPercent);
+    this.limitItem.text = `${out !== undefined ? '$(warning)' : '$(dashboard)'} ${who} ${w.label} ${pct}%${out !== undefined ? (out <= now ? ' · used up' : ` · out in ${fmtAbout(out - now)}`) : ''}`;
+    this.limitItem.backgroundColor =
+      (out !== undefined && out - now < 30 * 60_000) || pct >= 95 ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
+    const md = new vscode.MarkdownString(undefined, true);
+    md.appendMarkdown('**Kvali** — plan limits\n\n');
+    for (const l of snapshot.limits ?? []) {
+      for (const x of l.windows) {
+        const reset = x.resetsAt !== undefined && x.resetsAt > now ? `resets ${fmtClock(x.resetsAt)}` : undefined;
+        const end = x.runsOutAt !== undefined ? (x.runsOutAt <= now ? 'used up' : `used up around ${fmtClock(x.runsOutAt)} at the pace of the last hour`) : undefined;
+        md.appendMarkdown(`${l.agentLabel} · ${x.label}: **${Math.round(x.usedPercent)}%**${[end, reset].filter(Boolean).map((t) => ` · ${t}`).join('')}  \n`);
+      }
+    }
+    this.limitItem.tooltip = md;
+    this.limitItem.show();
+  }
+
   dispose(): void {
     this.item.dispose();
+    this.limitItem.dispose();
   }
 }
