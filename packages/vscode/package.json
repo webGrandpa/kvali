@@ -365,7 +365,7 @@
   "devDependencies": {
     "@kvali/core": "workspace:*",
     "@types/vscode": "1.90.0",
-    "@vscode/vsce": "3.9.2",
-    "preact": "10.29.8"
+    "@vscode/vsce": "4.1.0",
+    "preact": "11.2.0"
   }
 }
