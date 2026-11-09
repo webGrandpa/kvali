@@ -3,8 +3,8 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import path from 'node:path';
 import { test } from 'node:test';
 import { claudeHookReply, pluginRunsIn } from '../src/hooks/replies.ts';
-import { claudeHooksStatus, installClaudeHooks } from '../src/hooks/claude-install.ts';
-import { findClaudeBinary, kvaliPluginDir, readKvaliState } from '../src/hooks/claude-plugin.ts';
+import { CLAUDE_TODO_TOOLS_ENV, claudeHooksStatus, disableClaudeTodoTools, enableClaudeTodoTools, installClaudeHooks } from '../src/hooks/claude-install.ts';
+import { compareVersions, findClaudeBinary, kvaliPluginDir, readKvaliState, syncClaudePlugin } from '../src/hooks/claude-plugin.ts';
 import { applySetup, removeSetup } from '../src/setup.ts';
 import { tmpHome, writeText } from './helpers.ts';
 
@@ -66,6 +66,12 @@ test('Turn on installs the Claude Code plugin with Claude Code\'s own command an
   assert.equal(s.model, 'opus');
   assert.equal(s.hooks.Stop[0].hooks[0].command, 'say done', "the user's own hooks stay");
   assert.equal((await readKvaliState(home)).claudePlugin, true);
+  // Current Claude models get the task-list tools only when asked, and plans need them.
+  assert.equal(s.env?.[CLAUDE_TODO_TOOLS_ENV], '1', "Claude Code's task-list tools are turned on");
+  await applySetup(home, env, 47821, undefined, { pluginDir: bundled, autoPlan: false });
+  assert.equal(JSON.parse(readFileSync(settings, 'utf8')).env, undefined, 'automatic plans off: the switch goes again');
+  await applySetup(home, env, 47821, undefined, { pluginDir: bundled });
+  assert.equal(JSON.parse(readFileSync(settings, 'utf8')).env?.[CLAUDE_TODO_TOOLS_ENV], '1');
 
   // Next start: enabled already, nothing to run. An update only replaces the folder, which Claude Code reads in place.
   const calls = fake.log().length;
@@ -83,6 +89,48 @@ test('Turn on installs the Claude Code plugin with Claude Code\'s own command an
   assert.deepEqual([after.enabledPlugins, after.extraKnownMarketplaces], [{}, {}]);
   assert.equal(await claudeHooksStatus(settings, 47821), 'not-installed', "Turn off removes Kvali's hooks too");
   assert.equal(after.hooks.Stop[0].hooks[0].command, 'say done');
+  assert.equal(after.env, undefined, 'and the task-list switch it added');
+});
+
+test("Claude Code's task-list switch: Kvali adds it, keeps the person's own value and takes back only its own", async () => {
+  const home = tmpHome();
+  const settings = path.join(home, '.claude', 'settings.json');
+  writeText(settings, JSON.stringify({ env: { FOO: 'bar' } }));
+  assert.deepEqual(await enableClaudeTodoTools(settings, home), { changed: true });
+  assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')).env, { FOO: 'bar', [CLAUDE_TODO_TOOLS_ENV]: '1' });
+  assert.equal((await readKvaliState(home)).claudeTodoTools, true);
+  assert.deepEqual(await enableClaudeTodoTools(settings, home), { changed: false }, 'already on: the file is left alone');
+  assert.deepEqual(await disableClaudeTodoTools(settings, home), { changed: true });
+  assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')).env, { FOO: 'bar' }, "the person's other variables stay");
+  assert.deepEqual(await disableClaudeTodoTools(settings, home), { changed: false });
+
+  // Set by the person, on or off: Kvali neither changes nor removes it.
+  const own = tmpHome();
+  const ownSettings = path.join(own, '.claude', 'settings.json');
+  writeText(ownSettings, JSON.stringify({ env: { [CLAUDE_TODO_TOOLS_ENV]: '0' } }));
+  assert.deepEqual(await enableClaudeTodoTools(ownSettings, own), { changed: false });
+  assert.deepEqual(await disableClaudeTodoTools(ownSettings, own), { changed: false });
+  assert.equal(JSON.parse(readFileSync(ownSettings, 'utf8')).env[CLAUDE_TODO_TOOLS_ENV], '0');
+
+  // No settings file yet: created with the switch, and an emptied env goes away again.
+  const fresh = tmpHome();
+  const freshSettings = path.join(fresh, '.claude', 'settings.json');
+  assert.deepEqual(await enableClaudeTodoTools(freshSettings, fresh), { changed: true });
+  await disableClaudeTodoTools(freshSettings, fresh);
+  assert.deepEqual(JSON.parse(readFileSync(freshSettings, 'utf8')), {});
+});
+
+test('An older Kvali never puts its older plugin over a newer one (Kvali in two editors, one not updated yet)', async () => {
+  const home = tmpHome();
+  const newer = bundledPlugin(path.join(home, 'vscode', 'claude-plugin'), '0.7.1');
+  const older = bundledPlugin(path.join(home, 'cursor', 'claude-plugin'), '0.7.0');
+  writeText(path.join(older, 'hooks', 'register.tsx'), 'export const register = () => { /* 0.7.0 */ }\n');
+  assert.equal(await syncClaudePlugin(newer, home), true);
+  assert.equal(await syncClaudePlugin(older, home), false, 'the older bundle leaves the newer plugin in place');
+  assert.doesNotMatch(readFileSync(path.join(kvaliPluginDir(home), 'hooks', 'register.tsx'), 'utf8'), /0\.7\.0/);
+  const next = bundledPlugin(path.join(home, 'vscode2', 'claude-plugin'), '0.8.0');
+  assert.equal(await syncClaudePlugin(next, home), true, 'a newer one replaces it');
+  assert.ok(compareVersions('0.7.0', '0.7.1') < 0 && compareVersions('0.10.0', '0.9.9') > 0 && compareVersions('1.2.3', '1.2.3') === 0);
 });
 
 test('Claude Code that cannot load the plugin, or no claude command at all: Kvali uses its hooks', async () => {

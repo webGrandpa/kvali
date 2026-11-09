@@ -698,7 +698,8 @@ export const baseName = (p: string): string => p.replace(/[\\/]+$/, '').split(/[
 /** Sent beside a prompt while the session has no unfinished plan: the same words as Kvali's hook. */
 export const PLAN_CONTEXT =
   'Progress tracking (Kvali): if this request takes more than two steps, start by creating a task list with TaskCreate ' +
-  'or TodoWrite, whichever you have (if neither is in your tool list, load one with ToolSearch first), keep exactly ' +
+  'or TodoWrite, whichever you have (if neither is in your tool list, look for them once with ToolSearch, and go on ' +
+  'without a list if they are not there), keep exactly ' +
   'one task in_progress, and mark each task completed as soon as it is done. ' +
   'The user follows your progress from that list, so keep it current.'
 
@@ -708,7 +709,8 @@ export const PLAN_ASK_AFTER = 6
 /** What a long turn with no plan reads after one of its tool results (once a turn). */
 export const PLAN_REMINDER =
   'Progress tracking (Kvali): this work has no task list yet. If more than two steps remain, create one now for the ' +
-  'steps left with TaskCreate or TodoWrite, whichever you have (load it with ToolSearch if it is not in your tool list), ' +
+  'steps left with TaskCreate or TodoWrite, whichever you have (if neither is in your tool list, look for them once ' +
+  'with ToolSearch, and go on without a list if they are not there), ' +
   'keep one task in_progress, and mark each completed as you finish it. The user follows your progress from that list.'
 
 /** `autoPlan` in Kvali's config file; on unless set to false. */

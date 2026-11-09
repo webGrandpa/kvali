@@ -12,7 +12,7 @@ Kvali runs on your computer. It has no account, no telemetry and no analytics, a
 ## What Kvali writes
 
 - `~/.kvali/`: its settings (`config.json`, readable only by your user account), the latest event of each session (`live/`, cleared after three days) and Claude Code's plan usage (`live/claude-code/limits.json`), the open editor windows and the requests one window passes to another to take you to an agent (`focus/`), and a copy of its Claude Code plugin.
-- Only when you choose **Turn on** (or run `kvali setup`): Kvali's Claude Code plugin, added with Claude Code's own `claude plugin` command (or Kvali's hooks in `~/.claude/settings.json` for a Claude Code without plugins), and a short, marked planning rule in `~/.codex/AGENTS.md` and `~/.gemini/GEMINI.md`. **Kvali: Turn Off**, `kvali setup off` and uninstalling the extension remove all of it.
+- Only when you choose **Turn on** (or run `kvali setup`): Kvali's Claude Code plugin, added with Claude Code's own `claude plugin` command, Kvali's hooks and, with automatic plans on, `CLAUDE_CODE_ENABLE_TODO_TOOLS` (Claude Code's task-list tools) in `~/.claude/settings.json`, and a short, marked planning rule in `~/.codex/AGENTS.md` and `~/.gemini/GEMINI.md`. **Kvali: Turn Off**, `kvali setup off` and uninstalling the extension remove all of it.
 - Only when you run them: **Kvali: Add Progress Protocol to AGENTS.md** (or `kvali protocol`) adds a marked section to the project's `AGENTS.md`; `kvali plan-rule` adds the planning rule to the agents' global instruction files, `~/.claude/CLAUDE.md` included.
 
 ## What leaves your computer

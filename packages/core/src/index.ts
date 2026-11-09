@@ -26,6 +26,9 @@ export {
   claudeHookCommand,
   claudeHooksStatus,
   claudeSettingsPath,
+  CLAUDE_TODO_TOOLS_ENV,
+  disableClaudeTodoTools,
+  enableClaudeTodoTools,
   installClaudeHooks,
   uninstallClaudeHooks,
 } from './hooks/claude-install.ts';

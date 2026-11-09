@@ -13,7 +13,8 @@ import type { LiveEvent } from './hub.ts';
 
 export const CLAUDE_PLAN_CONTEXT =
   'Progress tracking (Kvali): if this request takes more than two steps, start by creating a task list with TaskCreate ' +
-  'or TodoWrite, whichever you have (if neither is in your tool list, load one with ToolSearch first), keep exactly ' +
+  'or TodoWrite, whichever you have (if neither is in your tool list, look for them once with ToolSearch, and go on ' +
+  'without a list if they are not there), keep exactly ' +
   'one task in_progress, and mark each task completed as soon as it is done. ' +
   'The user follows your progress from that list, so keep it current.';
 

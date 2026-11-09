@@ -1,6 +1,6 @@
 {
   "name": "@kvali/core",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "description": "Editor-agnostic engine that reads local AI coding agent sessions (Claude Code, Codex, Gemini CLI, Antigravity, Copilot, Cline, Roo Code, Kilo Code, OpenCode, progress files) and normalizes progress, tokens and cost.",
   "license": "MIT",

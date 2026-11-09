@@ -15,6 +15,7 @@ import { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { HookStatus } from '../model.ts';
+import { readKvaliState, writeKvaliState } from './claude-plugin.ts';
 import { DEFAULT_HOOK_PORT } from './hub.ts';
 
 interface HookSpec {
@@ -150,6 +151,52 @@ export async function installClaudeHooks(file = claudeSettingsPath(), port = DEF
   // would only race Claude Code's own writes to it.
   if (before !== undefined && canonical(settings) === canonical(current)) return { changed: false };
   return { backup: await writeWithBackup(file, before, settings), changed: true };
+}
+
+/**
+ * Claude Code gives its task-list tools (TaskCreate, TaskUpdate…) to current models only when
+ * this variable is set. Without them Claude cannot keep a plan, and a plan is what becomes
+ * Kvali's progress bar.
+ */
+export const CLAUDE_TODO_TOOLS_ENV = 'CLAUDE_CODE_ENABLE_TODO_TOOLS';
+
+function envOf(settings: Settings): Record<string, unknown> | undefined {
+  return settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env) ? settings.env : undefined;
+}
+
+/**
+ * Turns on Claude Code's task-list tools in its settings (`env`), for sessions started from now
+ * on. A value the person set themselves, on or off, is left as it is.
+ */
+export async function enableClaudeTodoTools(file: string, home: string): Promise<{ changed: boolean }> {
+  const before = await fsp.readFile(file, 'utf8').catch(() => undefined);
+  const settings = await readSettings(file);
+  const env = envOf(settings);
+  if (env && CLAUDE_TODO_TOOLS_ENV in env) return { changed: false };
+  settings.env = { ...(env ?? {}), [CLAUDE_TODO_TOOLS_ENV]: '1' };
+  await writeWithBackup(file, before, settings);
+  await writeKvaliState(home, { claudeTodoTools: true });
+  return { changed: true };
+}
+
+/** Takes back the task-list switch, only when Kvali put it there and it is still as Kvali left it. */
+export async function disableClaudeTodoTools(file: string, home: string): Promise<{ changed: boolean }> {
+  if (!(await readKvaliState(home)).claudeTodoTools) return { changed: false };
+  const before = await fsp.readFile(file, 'utf8').catch(() => undefined);
+  let changed = false;
+  if (before !== undefined) {
+    const settings = await readSettings(file);
+    const env = envOf(settings);
+    if (env?.[CLAUDE_TODO_TOOLS_ENV] === '1') {
+      const { [CLAUDE_TODO_TOOLS_ENV]: _gone, ...rest } = env;
+      if (Object.keys(rest).length) settings.env = rest;
+      else delete settings.env;
+      await writeWithBackup(file, before, settings);
+      changed = true;
+    }
+  }
+  await writeKvaliState(home, { claudeTodoTools: false });
+  return { changed };
 }
 
 export async function uninstallClaudeHooks(file = claudeSettingsPath()): Promise<{ backup?: string; changed: boolean }> {

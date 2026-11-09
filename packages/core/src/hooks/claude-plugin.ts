@@ -54,15 +54,37 @@ export async function pluginFingerprint(dir: string): Promise<string | undefined
   return h.digest('hex');
 }
 
+/** The plugin's version from its manifest, e.g. "0.7.1". */
+export async function pluginVersion(dir: string): Promise<string | undefined> {
+  try {
+    const v = (JSON.parse(await fsp.readFile(path.join(dir, '.claude-plugin', 'plugin.json'), 'utf8')) as { version?: unknown }).version;
+    return typeof v === 'string' ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Compares "x.y.z" versions: negative when `a` is older than `b`. */
+export function compareVersions(a: string, b: string): number {
+  const parts = (v: string) => v.split(/[.+-]/).slice(0, 3).map((n) => Number.parseInt(n, 10) || 0);
+  const [x, y] = [parts(a), parts(b)];
+  for (let i = 0; i < 3; i += 1) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) - (y[i] ?? 0);
+  return 0;
+}
+
 /**
  * Puts the plugin that ships with Kvali into `~/.kvali/claude-plugin` when that folder
  * differs from it (first setup, or Kvali was updated). Returns whether anything changed.
+ * A newer plugin is never replaced by an older one: with Kvali in two editors, the one not
+ * yet updated would otherwise put its older plugin back each time it starts.
  */
 export async function syncClaudePlugin(bundledDir: string, home: string): Promise<boolean> {
   const target = kvaliPluginDir(home);
   const [want, have] = await Promise.all([pluginFingerprint(bundledDir), pluginFingerprint(target)]);
   if (!want) throw new Error(`the Claude Code plugin is missing from ${bundledDir}`);
   if (want === have) return false;
+  const [mine, theirs] = await Promise.all([pluginVersion(bundledDir), pluginVersion(target)]);
+  if (mine && theirs && compareVersions(mine, theirs) < 0) return false;
   const next = `${target}.next`;
   await fsp.rm(next, { recursive: true, force: true });
   await fsp.mkdir(path.dirname(target), { recursive: true });
@@ -212,6 +234,8 @@ export async function claudePluginEnabled(settingsFile: string): Promise<boolean
 interface KvaliState {
   /** Kvali installed its Claude Code plugin (so it may remove it again). */
   claudePlugin?: boolean;
+  /** Kvali turned on Claude Code's task-list tools in its settings (so it may turn them off again). */
+  claudeTodoTools?: boolean;
 }
 
 export async function readKvaliState(home: string): Promise<KvaliState> {

@@ -3,7 +3,9 @@
  *
  * "Turn on" means:
  *   - Claude Code: Kvali's plugin (live pane, exact status, alerts, automatic plans), added with
- *     Claude Code's own plugin command; Kvali's hooks only where that Claude Code has no plugins
+ *     Claude Code's own plugin command; Kvali's hooks beside it (for a Claude Code that cannot load
+ *     plugins); and, with automatic plans on, Claude Code's task-list tools, which it does not give
+ *     current models unless asked
  *   - Codex: a short planning rule in ~/.codex/AGENTS.md
  *   - Gemini CLI / Antigravity: the same rule in ~/.gemini/GEMINI.md
  * Everything is marked, idempotent and removed again by `removeSetup` (the extension
@@ -11,7 +13,7 @@
  */
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
-import { claudeSettingsPath, installClaudeHooks, uninstallClaudeHooks } from './hooks/claude-install.ts';
+import { claudeSettingsPath, disableClaudeTodoTools, enableClaudeTodoTools, installClaudeHooks, uninstallClaudeHooks } from './hooks/claude-install.ts';
 import {
   claudeExtensionDirs,
   claudePluginEnabled,
@@ -63,7 +65,7 @@ export function detectedLabels(d: DetectedAgents): string[] {
 /** Human-readable list of what `applySetup` changes, for consent screens. */
 export function setupChanges(d: DetectedAgents): string[] {
   const out: string[] = [];
-  if (d.claude) out.push("Claude Code: the Kvali plugin (live progress pane, exact status, alerts, automatic plans), added with Claude Code's own plugin command");
+  if (d.claude) out.push("Claude Code: the Kvali plugin (live progress pane, exact status, alerts, automatic plans), added with Claude Code's own plugin command, and its task-list tools turned on in ~/.claude/settings.json (current Claude models do not get them unless asked)");
   if (d.codex) out.push('Codex: a planning rule in ~/.codex/AGENTS.md');
   if (d.gemini) out.push(`${d.antigravity ? 'Antigravity / Gemini CLI' : 'Gemini CLI'}: a planning rule in ~/.gemini/GEMINI.md`);
   return out;
@@ -74,6 +76,8 @@ export interface SetupOptions {
   pluginDir?: string;
   /** Claude Code editor extension folders the editor knows (its `claude` command lives inside). */
   claudeExtensionDirs?: readonly string[];
+  /** Automatic plans (`kvali.autoPlan`); on unless set to false. They need Claude Code's task-list tools. */
+  autoPlan?: boolean;
 }
 
 export interface SetupResult {
@@ -117,6 +121,9 @@ export async function applySetup(home: string, env: Env = {}, port = DEFAULT_HOO
       result.claude = 'hooks';
       result.claudeNote = plugin.note;
     }
+    // A plan is what becomes the progress bar, and Claude needs its task-list tools to keep one.
+    if (opts.autoPlan === false) await disableClaudeTodoTools(settings, home);
+    else await enableClaudeTodoTools(settings, home);
   }
   const only: InstructionTarget[] = [];
   if (agents.codex) only.push('codex');
@@ -130,5 +137,6 @@ export async function removeSetup(home: string, env: Env = {}, opts: Pick<SetupO
   const bin = await findClaudeBinary({ home, env, extensionDirs: [...(opts.claudeExtensionDirs ?? []), ...(await claudeExtensionDirs(home))] }).catch(() => undefined);
   await removeClaudePlugin({ home, env, settingsFile: settings, bin }).catch(() => undefined);
   await uninstallClaudeHooks(settings).catch(() => undefined);
+  await disableClaudeTodoTools(settings, home).catch(() => undefined);
   await removeGlobalPlanRule(home, env).catch(() => undefined);
 }

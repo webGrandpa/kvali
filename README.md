@@ -124,7 +124,7 @@ One consent, everything marked and reversible (also `kvali setup` / `kvali setup
 
 | Agent found | Change | Why |
 | --- | --- | --- |
-| Claude Code | Kvali's plugin, added with Claude Code's own `claude plugin` command | The live pane, exact status and "Needs you", phone alerts, and while a session has no unfinished plan, a request to keep a task list (~60 tokens, only then). For a Claude Code without plugins: 4 hooks in `~/.claude/settings.json`, kept beside the plugin |
+| Claude Code | Kvali's plugin, added with Claude Code's own `claude plugin` command, and `CLAUDE_CODE_ENABLE_TODO_TOOLS` in the `env` of `~/.claude/settings.json` | The live pane, exact status and "Needs you", phone alerts, and while a session has no unfinished plan, a request to keep a task list (~60 tokens, only then). Claude Code gives its task-list tools (TaskCreate, TaskUpdate) to current Claude models only when that variable is set, and without them Claude cannot keep a plan. Kvali leaves a value you set yourself as it is, and removes its own with automatic plans off (`kvali.autoPlan`). For a Claude Code without plugins: 4 hooks in `~/.claude/settings.json`, kept beside the plugin |
 | Codex | a 4-line rule in `~/.codex/AGENTS.md` | Codex keeps an `update_plan` list for multi-step work |
 | Gemini CLI / Antigravity | the same rule in `~/.gemini/GEMINI.md` | `write_todos` / `task.md` for multi-step work |
 

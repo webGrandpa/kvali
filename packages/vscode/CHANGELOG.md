@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1 — 2026-11-09
+
+- **Claude Code's progress bar fills again with current Claude models.** Recent Claude Code gives its task-list tools (TaskCreate, TaskUpdate) only to models up to Opus 4.7 and Sonnet 4.6, unless `CLAUDE_CODE_ENABLE_TODO_TOOLS` is set. With a newer model Claude could not keep a plan: it searched for the tools, found none, and the card showed only the moving bar. With automatic plans on, Kvali now sets that variable in `~/.claude/settings.json`, for Claude Code sessions started from then on. A value you set yourself is left as it is; Turn Off, or automatic plans off (`kvali.autoPlan`), removes Kvali's. When the tools are not there, the plan request now stops after one search.
+- With Kvali in two editors, the one not updated yet no longer puts its older Claude Code plugin back each time it starts.
+
 ## 0.7.0 — 2026-11-08
 
 - **Five more agents, with no setup**: GitHub Copilot (the Copilot CLI, and VS Code's Copilot chats that run on the same agent runtime), Cline, Roo Code, Kilo Code and OpenCode. Their plans become progress bars (Copilot's `update_todo` and todo table, Cline's focus chain, Roo Code's todo list, OpenCode's and Kilo Code's `todowrite`), with the step they are on, tokens and API value as each agent priced them, and "needs you" for approvals and questions: exact for Copilot and OpenCode, after three seconds for Cline and Roo Code (a step they approve by themselves passes at once). Cline and Roo Code are found in every editor built on VS Code (VS Code, Cursor, Windsurf, Antigravity, VSCodium, …), editor profiles and remote servers included. OpenCode and Kilo Code keep their sessions in SQLite, which Kvali reads with the editor's built-in SQLite (current VS Code, Cursor and Windsurf; Node 22.13 or later for `kvali`).

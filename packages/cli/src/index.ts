@@ -77,7 +77,7 @@ import {
   type Snapshot,
 } from '@kvali/core';
 
-const VERSION = '0.7.0';
+const VERSION = '0.7.1';
 
 interface Options {
   json: boolean;

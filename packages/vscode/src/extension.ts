@@ -85,6 +85,7 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
   const setupOptions = (): SetupOptions => ({
     pluginDir: path.join(context.extensionPath, 'dist', 'claude-plugin'),
     claudeExtensionDirs: vscode.extensions.all.filter((x) => x.id.toLowerCase() === 'anthropic.claude-code').map((x) => x.extensionPath),
+    autoPlan: config.autoPlan,
   });
   let detected: DetectedAgents = { claude: false, codex: false, gemini: false, antigravity: false };
   const setupState = (): SetupState => (context.globalState.get<string>(SETUP_KEY) as SetupState | undefined) ?? 'unset';
@@ -692,7 +693,8 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
       if (!e.affectsConfiguration('kvali')) return;
       const before = config;
       config = readConfig();
-      if (before.autoPlan !== config.autoPlan) void shareSettings();
+      // Automatic plans also switch Claude Code's task-list tools, which setup manages.
+      if (before.autoPlan !== config.autoPlan) void shareSettings().then(() => repairSetup());
       engine.configure({
         activeWindowMs: config.activeWindowHours * 3_600_000,
         staleAfterMs: config.staleAfterMinutes * 60_000,
