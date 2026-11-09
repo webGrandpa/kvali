@@ -9,6 +9,8 @@ import {
   readPhoneConfig,
   telegramBot,
   telegramFindChat,
+  telegramPairCode,
+  telegramStartLink,
   telegramText,
   writePhoneConfig,
   type PhoneConfig,
@@ -112,18 +114,34 @@ test('PushSender: a failing channel is named, by host only, and the others still
   assert.equal(f.calls.length, 2);
 });
 
-test('Telegram setup: the token names the bot, and the first message to it names the chat', async () => {
+test('Telegram setup: the token names the bot, and only a message with the code names the chat', async () => {
+  const code = telegramPairCode();
+  assert.match(code, /^\d{6}$/);
+  assert.equal(telegramStartLink('kvali_goga_bot', code), `https://t.me/kvali_goga_bot?start=${code}`);
   const f = fakeFetch((c) => {
     if (c.url.endsWith('/getMe')) return { json: { ok: true, result: { username: 'kvali_goga_bot' } } };
-    if (c.url.includes('getUpdates') && !c.url.includes('offset')) return { json: { ok: true, result: [{ update_id: 7, message: { chat: { id: 4242, type: 'private' } } }] } };
+    if (c.url.includes('getUpdates') && !c.url.includes('offset'))
+      return {
+        json: {
+          ok: true,
+          result: [
+            // Anyone may find a bot and write to it: a stranger's message, before and while Kvali waits.
+            { update_id: 5, message: { text: 'hi', chat: { id: 666, type: 'private', first_name: 'Stranger' } } },
+            { update_id: 6, message: { text: `/start ${code}`, chat: { id: 777, type: 'group', title: 'A group' } } },
+            { update_id: 7, message: { text: `/start ${code}`, chat: { id: 4242, type: 'private', first_name: 'Goga', username: 'goga' } } },
+            { update_id: 8, message: { text: 'later', chat: { id: 666, type: 'private' } } },
+          ],
+        },
+      };
     return { json: { ok: true, result: [] } };
   });
   assert.deepEqual(await telegramBot(TOKEN, f.impl), { ok: true, username: 'kvali_goga_bot' });
   assert.deepEqual(await telegramBot('123:bad', f.impl), { ok: false, error: 'that is not a bot token (it looks like 123456789:AAF…)' });
-  assert.equal(await telegramFindChat(TOKEN, 5_000, f.impl), '4242');
-  assert.match(f.calls.at(-1)!.url, /getUpdates\?timeout=0&offset=8$/, 'the message read is acknowledged');
-  const none = fakeFetch(() => ({ json: { ok: true, result: [] } }));
-  assert.equal(await telegramFindChat(TOKEN, 1_200, none.impl), undefined);
+  assert.deepEqual(await telegramFindChat(TOKEN, code, 5_000, f.impl), { id: '4242', name: 'Goga (@goga)' });
+  assert.match(f.calls.at(-1)!.url, /getUpdates\?timeout=0&offset=9$/, 'the messages read are acknowledged');
+  const strangers = fakeFetch(() => ({ json: { ok: true, result: [{ update_id: 1, message: { text: 'hello 12345678', chat: { id: 666, type: 'private' } } }] } }));
+  assert.equal(await telegramFindChat(TOKEN, code, 1_200, strangers.impl), undefined, 'no code, no chat');
+  assert.equal(await telegramFindChat(TOKEN, '1.*', 1_200, f.impl), undefined, 'a code is six digits');
 });
 
 test('Discord setup checks the webhook; message bodies stay within Discord\'s limits', async () => {

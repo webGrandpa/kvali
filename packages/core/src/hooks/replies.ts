@@ -2,7 +2,7 @@
  * What the hook hub answers to a synchronous hook.
  *
  * Today one reply exists: when a Claude Code prompt arrives and the session has no
- * unfinished plan, ask Claude to keep a task list. The text costs ~60 tokens, is only
+ * unfinished plan, ask Claude to keep a task list. The text costs about 100 tokens, is only
  * sent while there is no plan, and never contains anything from the user's prompt.
  */
 import { existsSync } from 'node:fs';

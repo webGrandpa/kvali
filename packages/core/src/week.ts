@@ -5,6 +5,7 @@
  */
 import { fmtTokens, fmtUsd } from './format.ts';
 import type { AgentSession } from './model.ts';
+import { cleanText } from './util/text.ts';
 
 export interface WeekDay {
   /** Local calendar day, `YYYY-MM-DD`. */
@@ -126,7 +127,9 @@ export function weekShareText(w: WeekStats, opts: { cost?: boolean } = {}): stri
   return `My AI coding agents this week${who}: ${facts.join(', ') || 'getting started'}.\n\nTracked with Kvali, an open-source progress bar for AI agents: ${KVALI_URL}`;
 }
 
-const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+/** Text for the SVG: no characters XML forbids, the markup characters escaped. */
+const esc = (t: string) =>
+  cleanText(t, 300).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 
 /**
  * The card as SVG (the CLI's version; the editor draws the same card as a PNG). 1200×630:

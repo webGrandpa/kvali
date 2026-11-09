@@ -7,6 +7,7 @@
 import { promises as fsp, watch, type FSWatcher } from 'node:fs';
 import path from 'node:path';
 import { pathWithin } from '@kvali/core';
+import { isWorkspaceRoot } from './paths.ts';
 
 export interface WindowFile {
   id: string;
@@ -25,6 +26,16 @@ const HEARTBEAT_MS = 20_000;
 const EXPIRES_MS = 65_000;
 /** A request older than this is stale: the person has moved on. */
 const FOCUS_FRESH_MS = 15_000;
+
+/** A heartbeat as another window wrote it, or nothing when it is not one. */
+export function windowFile(v: unknown): WindowFile | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const o = v as Record<string, unknown>;
+  if (typeof o.id !== 'string' || !/^[\w.-]{1,100}$/.test(o.id) || typeof o.at !== 'number' || !Array.isArray(o.roots)) return undefined;
+  const roots = o.roots.filter(isWorkspaceRoot).slice(0, 100);
+  const workspaceFile = typeof o.workspaceFile === 'string' && o.workspaceFile.endsWith('.code-workspace') && isWorkspaceRoot(o.workspaceFile) ? o.workspaceFile : undefined;
+  return { id: o.id, roots, ...(workspaceFile && { workspaceFile }), at: o.at };
+}
 
 export class WindowRegistry {
   readonly id = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
@@ -68,7 +79,8 @@ export class WindowRegistry {
         if (!f.endsWith('.json') || f === `${this.id}.json`) continue;
         const p = path.join(this.dir, f);
         try {
-          const w = JSON.parse(await fsp.readFile(p, 'utf8')) as WindowFile;
+          const w = windowFile(JSON.parse(await fsp.readFile(p, 'utf8')));
+          if (!w) continue;
           if (now - w.at < EXPIRES_MS) others.push(w);
           else if (now - w.at > 10 * EXPIRES_MS) await fsp.unlink(p).catch(() => {});
         } catch {

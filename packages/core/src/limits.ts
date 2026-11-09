@@ -28,6 +28,10 @@ export interface AgentLimits {
 
 /** Readings older than this are dropped. */
 const KEEP_MS = 6 * 3_600_000;
+/** A reading this far in the future is a wrong clock or a broken file. */
+const FUTURE_SLACK_MS = 5 * 60_000;
+/** Readings kept per window: plenty for an hour's pace, and a bound on what a file can make Kvali keep. */
+const MAX_SAMPLES = 720;
 /** The forecast follows the pace of this much recent time. */
 export const PACE_MS = 60 * 60_000;
 /** Less than this between the first and the latest reading says nothing about a pace. */
@@ -69,10 +73,15 @@ export function runsOutAt(samples: readonly Sample[], latest: { at: number; used
 export class LimitBook {
   private readonly books = new Map<string, WindowBook>();
 
-  /** Adds a reading taken at `at`. Older readings than the window's latest are ignored. */
-  add(reading: LimitReading, at: number): void {
+  /**
+   * Adds a reading taken at `at`. Older readings than the window's latest are ignored, and so is
+   * one from the future (a wrong clock or a broken file would otherwise hide every real one).
+   */
+  add(reading: LimitReading, at: number, now?: number): void {
     if (!Number.isFinite(reading.usedPercent) || !Number.isFinite(at)) return;
-    const pct = Math.max(0, reading.usedPercent);
+    if (now !== undefined && at > now + FUTURE_SLACK_MS) return;
+    if (typeof reading.label !== 'string' || !reading.label || reading.label.length > 40) return;
+    const pct = Math.min(100, Math.max(0, reading.usedPercent));
     let book = this.books.get(reading.label);
     if (book) {
       const sameWindow =
@@ -86,6 +95,7 @@ export class LimitBook {
         if (at >= book.latest.at - KEEP_MS && !book.samples.some((s) => s.at === at)) {
           book.samples.push({ at, pct });
           book.samples.sort((a, b) => a.at - b.at);
+          if (book.samples.length > MAX_SAMPLES) book.samples.splice(0, book.samples.length - MAX_SAMPLES);
         }
         return;
       }
@@ -99,6 +109,7 @@ export class LimitBook {
     book.latest = { ...reading, usedPercent: pct, at };
     const cutoff = at - KEEP_MS;
     while (book.samples.length > 1 && book.samples[0]!.at < cutoff) book.samples.shift();
+    if (book.samples.length > MAX_SAMPLES) book.samples.splice(0, book.samples.length - MAX_SAMPLES);
   }
 
   get size(): number {

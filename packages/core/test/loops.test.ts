@@ -113,8 +113,9 @@ test('phone: one push when an agent goes in circles', () => {
   const pushes = planner.observe(snap(session(loop)), cfg);
   assert.deepEqual(
     pushes.map((p) => [p.title, p.message, p.priority, p.tags]),
-    [['Claude Code is going in circles · shop', '“pnpm test” failed 4 times in a row with the same error · for 12m 00s · 180k tokens. It may need a hint from you.\nFix the cart totals', 4, ['repeat']]],
+    [['Claude Code is going in circles · shop', '“Run the tests” failed 4 times in a row with the same error · for 12m 00s · 180k tokens. It may need a hint from you.\nFix the cart totals', 4, ['repeat']]],
   );
+  assert.doesNotMatch(JSON.stringify(pushes), /pnpm test/, 'the command line itself never leaves the computer');
   now += MIN;
   assert.deepEqual(planner.observe(snap(session({ ...loop, count: 5 })), cfg), [], 'once per loop');
   const quiet = planner.observe(snap(session({ ...loop, since: now })), { events: ['stuck'], details: false });

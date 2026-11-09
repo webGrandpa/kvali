@@ -1,0 +1,22 @@
+# Keeps the pinned actions (by commit) and the dependencies current: one pull request per
+# ecosystem a month, so updates are reviewed together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    ignore:
+      # Must not be newer than the oldest editor the extension supports (engines.vscode).
+      - dependency-name: '@types/vscode'
+    groups:
+      dependencies:
+        patterns: ['*']

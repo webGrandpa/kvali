@@ -69,20 +69,27 @@ export type FromWebview =
   | { type: 'hidePhoneCard' }
   | { type: 'showPhoneCard' }
   | { type: 'phoneEvents'; events: string[]; doneAfterSec: number }
-  | {
-      type: 'command';
-      command:
-        | 'kvali.setup'
-        | 'kvali.addProgressProtocol'
-        | 'kvali.reportProblem'
-        | 'kvali.refresh'
-        | 'kvali.showLog'
-        | 'kvali.phoneSetup'
-        | 'kvali.phoneTest'
-        | 'kvali.phoneOff'
-        | 'kvali.telegramSetup'
-        | 'kvali.discordSetup'
-        | 'kvali.telegramOff'
-        | 'kvali.discordOff'
-        | 'kvali.shareWeek';
-    };
+  | { type: 'command'; command: WebviewCommand };
+
+/** The commands the panel's buttons run. */
+export const WEBVIEW_COMMANDS = [
+  'kvali.setup',
+  'kvali.addProgressProtocol',
+  'kvali.reportProblem',
+  'kvali.refresh',
+  'kvali.showLog',
+  'kvali.phoneSetup',
+  'kvali.phoneTest',
+  'kvali.phoneOff',
+  'kvali.telegramSetup',
+  'kvali.discordSetup',
+  'kvali.telegramOff',
+  'kvali.discordOff',
+  'kvali.shareWeek',
+] as const;
+
+export type WebviewCommand = (typeof WEBVIEW_COMMANDS)[number];
+
+export function isWebviewCommand(c: unknown): c is WebviewCommand {
+  return typeof c === 'string' && (WEBVIEW_COMMANDS as readonly string[]).includes(c);
+}

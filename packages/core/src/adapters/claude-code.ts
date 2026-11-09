@@ -19,7 +19,7 @@
  */
 import path from 'node:path';
 import type { Adapter, AdapterContext } from '../adapter.ts';
-import { staleness } from '../adapter.ts';
+import { isolated, staleness } from '../adapter.ts';
 import type { Activity, AgentSession, DailyUsage, PulsePhase, TaskItem, TaskStatus, TokenUsage } from '../model.ts';
 import { addTokens, emptyTokens, progressOf, totalTokens } from '../model.ts';
 import { findGitRoot, listDir, readJsonSafe, statSafe } from '../util/fs.ts';
@@ -270,17 +270,19 @@ export class ClaudeCodeAdapter implements Adapter {
 
     const out: AgentSession[] = [];
     for (const entry of this.sessions.values()) {
-      const res = await entry.tail.read(
-        (rec) => this.onRecord(entry.state, rec, ctx, false),
-        () => {
-          entry.state = this.createState(entry.state.file);
-        },
-      );
-      await this.readSideFiles(entry.state, ctx, res.changed);
+      await isolated(ctx, `[claude-code] ${path.basename(entry.state.file)}`, async () => {
+        const res = await entry.tail.read(
+          (rec) => this.onRecord(entry.state, rec, ctx, false),
+          () => {
+            entry.state = this.createState(entry.state.file);
+          },
+        );
+        await this.readSideFiles(entry.state, ctx, res.changed);
+      });
     }
-    await this.readLegacyAgents(ctx);
+    await isolated(ctx, '[claude-code] subagents', () => this.readLegacyAgents(ctx));
     for (const entry of this.sessions.values()) {
-      const s = this.toSession(entry.state, ctx);
+      const s = await isolated(ctx, `[claude-code] ${path.basename(entry.state.file)}`, () => this.toSession(entry.state, ctx));
       if (s) out.push(s);
     }
     return out;
@@ -716,7 +718,7 @@ export class ClaudeCodeAdapter implements Adapter {
     else if (pst.mtimeMs !== st.pulse?.mtimeMs) {
       const pulse = await readJsonSafe<PulseFile>(pulseFile);
       st.pulse = pulse && typeof pulse.at === 'number' && typeof pulse.phase === 'string' ? { ...pulse, mtimeMs: pst.mtimeMs } : undefined;
-      if (st.pulse?.limits) this.addLimits(st.pulse.limits);
+      if (st.pulse?.limits) this.addLimits(st.pulse.limits, ctx.now());
     }
 
     // Subagent transcripts (tokens only), current layout.
@@ -744,7 +746,7 @@ export class ClaudeCodeAdapter implements Adapter {
     return windows.length ? { agent: this.id, agentLabel: this.label, windows } : undefined;
   }
 
-  private addLimits(l: NonNullable<PulseFile['limits']>): void {
+  private addLimits(l: NonNullable<PulseFile['limits']>, now: number): void {
     if (typeof l.at !== 'number' || !Array.isArray(l.windows)) return;
     for (const w of l.windows) {
       if (!w || typeof w.kind !== 'string' || typeof w.percentUsed !== 'number') continue;
@@ -754,10 +756,10 @@ export class ClaudeCodeAdapter implements Adapter {
       const series = l.samples?.[w.kind];
       if (Array.isArray(series)) {
         for (const pt of series) {
-          if (Array.isArray(pt) && typeof pt[0] === 'number' && typeof pt[1] === 'number') this.limitBook.add({ label, usedPercent: pt[1], resetsAt, windowMinutes }, pt[0]);
+          if (Array.isArray(pt) && typeof pt[0] === 'number' && typeof pt[1] === 'number') this.limitBook.add({ label, usedPercent: pt[1], resetsAt, windowMinutes }, pt[0], now);
         }
       }
-      this.limitBook.add({ label, usedPercent: w.percentUsed, resetsAt, windowMinutes }, l.at);
+      this.limitBook.add({ label, usedPercent: w.percentUsed, resetsAt, windowMinutes }, l.at, now);
     }
   }
 

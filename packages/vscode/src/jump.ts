@@ -12,6 +12,7 @@
 import * as vscode from 'vscode';
 import { pathWithin, type AgentId, type AgentSession } from '@kvali/core';
 import { AGENT_PROCESS, childrenOf, descendants, isAncestor, processCwds, processTable, type Proc } from './processes.ts';
+import { SAFE_ID, safeFile, safeFolder } from './paths.ts';
 import type { WindowRegistry } from './windows.ts';
 
 /** Commands that open an agent's own panel, most specific first. Only those that exist here are used. */
@@ -134,7 +135,7 @@ async function panelHere(s: AgentSession): Promise<boolean> {
   if (s.host === 'terminal' && AGENT_PROCESS[s.agent]) return false;
   // A session of an agent's editor extension: its own chat, open or closed.
   const open = SESSION_PANEL[s.agent];
-  if (open && s.host === 'editor' && s.id && (await vscode.commands.getCommands(true)).includes(open)) {
+  if (open && s.host === 'editor' && SAFE_ID.test(s.id) && (await vscode.commands.getCommands(true)).includes(open)) {
     await vscode.commands.executeCommand(open, s.id);
     return true;
   }
@@ -156,7 +157,7 @@ export async function goToAgent(s: AgentSession, deps: JumpDeps): Promise<JumpRe
   if (await terminalHere(s, deps)) return 'terminal';
   const here = deps.roots().some((r) => pathWithin(s.projectPath, r));
   const other = !here ? deps.windows.ownerOf(s.projectPath) : undefined;
-  const target = other && (other.workspaceFile ?? other.roots.find((r) => pathWithin(s.projectPath, r)));
+  const target = other && ((await safeFile(other.workspaceFile)) ?? (await safeFolder(other.roots.find((r) => pathWithin(s.projectPath, r)))));
   if (other && target) {
     await deps.windows.requestFocus(other.id, s.key);
     // Opening a folder that a window already has open brings that window to the front.

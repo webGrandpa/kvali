@@ -27,7 +27,7 @@
 import path from 'node:path';
 import { promises as fsp } from 'node:fs';
 import type { Adapter, AdapterContext } from '../adapter.ts';
-import { staleness } from '../adapter.ts';
+import { isolated, staleness } from '../adapter.ts';
 import type { Activity, AgentId, AgentSession, DailyUsage, SessionStatus, TaskItem, TaskStatus, TokenUsage } from '../model.ts';
 import { emptyTokens, progressOf, totalTokens } from '../model.ts';
 import type { Pricing } from '../pricing.ts';
@@ -36,7 +36,7 @@ import { editorUserDataDirs } from '../util/editors.ts';
 import { findGitRoot, listDir, readJsonSafe, readTextSafe, statSafe } from '../util/fs.ts';
 import { LoopWatch, loopKey } from '../util/loop-watch.ts';
 import { TaskTimer } from '../util/task-timer.ts';
-import { contentText, firstLine, summarizeCommand, truncate } from '../util/text.ts';
+import { contentText, firstLine, lookupTable, summarizeCommand, truncate } from '../util/text.ts';
 import { addTaskDone, addWork, dayKey, parseTime } from '../util/time.ts';
 
 export interface UiMessage {
@@ -64,7 +64,7 @@ export interface ClineTaskInfo {
 export type ClineFlavor = 'cline' | 'roo';
 
 /** An approval or question the extension waits on, and how to say what it waits for. */
-const WAIT_ASKS: Record<string, (m: UiMessage, label: string) => string> = {
+const WAIT_ASKS = lookupTable<(m: UiMessage, label: string) => string>({
   followup: () => 'Asked you a question',
   plan_mode_respond: () => 'Plan ready for your review',
   act_mode_respond: () => 'Waiting for your reply',
@@ -78,7 +78,7 @@ const WAIT_ASKS: Record<string, (m: UiMessage, label: string) => string> = {
   summarize_task: () => 'Wants to summarize the task',
   report_bug: () => 'Wants to report a bug',
   auto_approval_max_req_reached: (_m, label) => `${label} reached its auto-approve limit`,
-};
+});
 
 /** Rows that record bookkeeping, not what the agent is doing. */
 const QUIET_SAYS = new Set([
@@ -123,10 +123,11 @@ function parseJson<T = Record<string, any>>(text: string | undefined): T | undef
 
 /** Cline marks a command the model wants approved with a trailing `REQ_APP`. */
 function stripReqApp(cmd: string): string {
-  return cmd.replace(/\s*REQ_APP\s*$/, '');
+  const t = cmd.trimEnd();
+  return t.endsWith('REQ_APP') ? t.slice(0, -'REQ_APP'.length).trimEnd() : cmd;
 }
 
-const TOOL_LABELS: Record<string, string> = {
+const TOOL_LABELS = lookupTable<string>({
   editedExistingFile: 'Edit',
   appliedDiff: 'Edit',
   insertContent: 'Edit',
@@ -152,7 +153,7 @@ const TOOL_LABELS: Record<string, string> = {
   imageGenerated: 'Generate image',
   runSlashCommand: 'Slash command',
   updateTodoList: 'Update plan',
-};
+});
 
 /** The action a tool, command, MCP or browser row describes. */
 function toolActivity(m: UiMessage): Activity | undefined {
@@ -509,9 +510,10 @@ abstract class ClineFamilyAdapter implements Adapter {
     const out: AgentSession[] = [];
     const byId = new Map<string, AgentSession>();
     for (const t of this.tracked.values()) {
-      await this.refresh(t, ctx);
-      if (!t.fold) continue;
-      const s = this.toSession(t, ctx);
+      const s = await isolated(ctx, `[${this.id}] ${t.id}`, async () => {
+        await this.refresh(t, ctx);
+        return t.fold ? this.toSession(t, ctx) : undefined;
+      });
       if (s) {
         out.push(s);
         byId.set(t.id, s);
@@ -822,7 +824,7 @@ interface SdkFold {
   lastError?: string;
 }
 
-const SDK_TOOL_LABELS: Record<string, string> = {
+const SDK_TOOL_LABELS = lookupTable<string>({
   read_files: 'Read',
   search_codebase: 'Search',
   run_commands: 'Shell',
@@ -837,7 +839,7 @@ const SDK_TOOL_LABELS: Record<string, string> = {
   read_file: 'Read',
   write_to_file: 'Write',
   replace_in_file: 'Edit',
-};
+});
 
 function sdkActivity(block: Record<string, any>, at: number): Activity {
   const name = String(block.name ?? 'tool');
@@ -990,8 +992,10 @@ export class ClineSdkSessions {
     }
     const out: AgentSession[] = [];
     for (const t of this.tracked.values()) {
-      await this.refresh(t);
-      const s = this.toSession(t, ctx, label);
+      const s = await isolated(ctx, `[${label}] ${t.id}`, async () => {
+        await this.refresh(t);
+        return this.toSession(t, ctx, label);
+      });
       if (s) out.push(s);
     }
     return out;

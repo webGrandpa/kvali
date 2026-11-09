@@ -2,7 +2,7 @@
   "name": "kvali",
   "displayName": "Kvali — AI Agent Progress Tracker",
   "description": "One progress bar for all your AI coding agents: plan progress, the current step, usage and alerts on your phone, grouped by project. Local and read-only.",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "publisher": "webgrandpa",
   "author": {
     "name": "Giorgi Khiladze",
@@ -233,6 +233,7 @@
         },
         "kvali.autoPlan": {
           "type": "boolean",
+          "scope": "application",
           "default": true,
           "description": "With the Claude Code hooks installed, ask Claude for a task list whenever a session has no unfinished plan (about 60 tokens per prompt, only while there is no plan). With Kvali's plugin it also keeps Claude Code's task tools in its tool list, so they are never hidden behind ToolSearch."
         },
@@ -251,6 +252,7 @@
         },
         "kvali.pollIntervalMs": {
           "type": "number",
+          "scope": "application",
           "default": 1500,
           "minimum": 500,
           "maximum": 30000,
@@ -283,6 +285,7 @@
         },
         "kvali.pricing": {
           "type": "object",
+          "scope": "application",
           "default": {},
           "additionalProperties": {
             "type": "object",
@@ -312,6 +315,7 @@
         },
         "kvali.agents.disabled": {
           "type": "array",
+          "scope": "application",
           "items": {
             "type": "string",
             "enum": [
@@ -332,6 +336,7 @@
         },
         "kvali.antigravity.brainDirs": {
           "type": "array",
+          "scope": "machine",
           "items": {
             "type": "string"
           },
@@ -340,7 +345,10 @@
         },
         "kvali.hooks.port": {
           "type": "number",
+          "scope": "machine",
           "default": 47821,
+          "minimum": 1024,
+          "maximum": 65535,
           "description": "Local port that agent hooks send events to (127.0.0.1 only). Reinstall the hooks after changing it."
         }
       }

@@ -12,6 +12,7 @@ import {
   newTopic,
   ntfyRequest,
   phoneBar,
+  phoneStatus,
   PhoneNotifier,
   PushPlanner,
   readPhoneConfig,
@@ -297,6 +298,21 @@ test('push planner: progress is one notification per task, updated at most once 
   assert.equal(ask[0]!.message, 'Waiting for your answer\n1/2 tasks');
   assert.equal(ask[0]!.sequence, undefined, 'a question is a notification of its own');
   assert.doesNotMatch(JSON.stringify(ask), /storefront|Stripe|secrets|Step/);
+});
+
+test('An approval reaches the phone by its kind, never with the command, file or address it names', () => {
+  assert.equal(phoneStatus('Needs approval: run curl -H "Authorization: Bearer sk-live-123" https://api.example.com'), 'Needs approval: run a command');
+  assert.equal(phoneStatus('Needs approval: bash psql postgres://user:pw@db/prod'), 'Needs approval: run a command');
+  assert.equal(phoneStatus('Needs approval: edit .env'), 'Needs approval: edit a file');
+  assert.equal(phoneStatus('Needs approval: fetch internal.example.com'), 'Needs approval: open a web page');
+  assert.equal(phoneStatus('Needs approval: Bash'), 'Needs approval: Bash');
+  assert.equal(phoneStatus('Needs approval: constructor'), 'Needs approval: constructor', 'a word, not a lookup in Object.prototype');
+  assert.equal(phoneStatus('Needs approval: ./deploy.sh --token x'), 'Needs approval');
+  assert.equal(phoneStatus('Asked you a question'), 'Asked you a question');
+  const s: AgentSession = { key: 'cline:t', agent: 'cline', agentLabel: 'Cline', id: 't', title: 'Deploy', status: 'waiting', statusDetail: 'Needs approval: run export TOKEN=s3cret', startedAt: 0, updatedAt: 0, tasks: [], sources: [] };
+  const p = formatPush('needs-you', s, true);
+  assert.match(p.message, /^Needs approval: run a command/);
+  assert.doesNotMatch(JSON.stringify(p), /s3cret|TOKEN/);
 });
 
 test('push planner: the person chooses the events, live actions included, and how long a task must be', () => {

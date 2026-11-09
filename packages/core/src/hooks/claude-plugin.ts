@@ -12,6 +12,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants as fsc, promises as fsp } from 'node:fs';
 import path from 'node:path';
+import { writeFileSafely } from '../util/files.ts';
 
 export const CLAUDE_PLUGIN_ID = 'kvali@kvali';
 export const CLAUDE_MARKETPLACE = 'kvali';
@@ -248,8 +249,8 @@ export async function readKvaliState(home: string): Promise<KvaliState> {
 
 export async function writeKvaliState(home: string, patch: Partial<KvaliState>): Promise<void> {
   const next = { ...(await readKvaliState(home)), ...patch };
-  await fsp.mkdir(path.dirname(stateFile(home)), { recursive: true });
-  await fsp.writeFile(stateFile(home), `${JSON.stringify(next, null, 2)}\n`);
+  await fsp.mkdir(path.dirname(stateFile(home)), { recursive: true, mode: 0o700 });
+  await writeFileSafely(stateFile(home), `${JSON.stringify(next, null, 2)}\n`);
 }
 
 /**

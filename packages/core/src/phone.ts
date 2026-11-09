@@ -8,12 +8,14 @@
  * The setup lives in `~/.kvali/config.json`, shared by the editor extension, the CLI and
  * the Claude Code plugin, so one setup covers every way Kvali runs.
  */
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomInt } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 import { fmtAbout, fmtClock, fmtDuration, fmtEta, fmtTokens, planEta, projectName, sessionTokens } from './format.ts';
 import type { AgentLimits } from './limits.ts';
 import { currentTask, progressOf, type AgentSession, type RateLimitWindow, type SessionStatus, type Snapshot } from './model.ts';
+import { writeFileSafely } from './util/files.ts';
+import { cleanText, lookupTable } from './util/text.ts';
 
 /**
  * What the phone hears about, each chosen by the person:
@@ -156,9 +158,8 @@ export async function writePhoneConfig(home: string, cfg: PhoneConfig | undefine
       doneAfter: cfg.doneAfterSec ?? DEFAULT_DONE_AFTER_SEC,
     };
   else delete all.phone;
-  await fsp.mkdir(path.dirname(file), { recursive: true });
-  await fsp.writeFile(file, `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600 });
-  await fsp.chmod(file, 0o600).catch(() => undefined);
+  await fsp.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  await writeFileSafely(file, `${JSON.stringify(all, null, 2)}\n`, 0o600);
 }
 
 /** Sets one top-level option in ~/.kvali/config.json (read by the CLI and the Claude Code plugin), keeping the rest. */
@@ -173,8 +174,18 @@ export async function setKvaliOption(home: string, key: 'autoPlan', value: boole
   }
   if (all[key] === value) return;
   all[key] = value;
-  await fsp.mkdir(path.dirname(file), { recursive: true });
-  await fsp.writeFile(file, `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600 });
+  await fsp.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  await writeFileSafely(file, `${JSON.stringify(all, null, 2)}\n`, 0o600);
+}
+
+/**
+ * Keeps ~/.kvali to its owner: it holds the phone settings (with tokens) and what agents are
+ * doing right now, which other people on a shared computer should not read.
+ */
+export async function secureKvaliHome(home: string, create = false): Promise<void> {
+  const dir = path.dirname(kvaliConfigFile(home));
+  if (create) await fsp.mkdir(dir, { recursive: true, mode: 0o700 }).catch(() => undefined);
+  await fsp.chmod(dir, 0o700).catch(() => undefined);
 }
 
 /** A topic nobody can guess (80 random bits): on ntfy.sh anyone who knows a topic's name can read it. */
@@ -438,33 +449,73 @@ export async function telegramBot(token: string, fetchImpl: typeof fetch = fetch
   }
 }
 
+/** A code the person sends their bot, so Kvali knows the message is theirs: anyone can write to a bot. */
+export function telegramPairCode(): string {
+  return String(randomInt(100_000, 1_000_000));
+}
+
+/** Opens the bot in Telegram with the code ready: pressing Start sends "/start <code>". */
+export function telegramStartLink(bot: string, code: string): string {
+  return `https://t.me/${encodeURIComponent(bot)}?start=${code}`;
+}
+
+export interface TelegramChat {
+  id: string;
+  /** Who wrote, as Telegram names them ("Ana (@ana)"), to show the person whom Kvali will write to. */
+  name?: string;
+}
+
+interface TelegramUpdate {
+  update_id: number;
+  message?: { text?: string; chat?: { id?: number; type?: string; first_name?: string; last_name?: string; username?: string } };
+}
+
+function chatName(c: NonNullable<NonNullable<TelegramUpdate['message']>['chat']>): string | undefined {
+  const full = [c.first_name, c.last_name].filter((x): x is string => typeof x === 'string' && !!x).join(' ');
+  const user = typeof c.username === 'string' && c.username ? `@${c.username}` : undefined;
+  const name = full && user ? `${full} (${user})` : full || user;
+  return name ? cleanText(name, 80) : undefined;
+}
+
 /**
- * Waits for the person to send their bot a message and returns the chat it came from: the
- * bot may only write to people who wrote to it first. Long-polls `getUpdates` until `waitMs`.
+ * Waits for the person to send their bot the pairing code and returns the chat it came from: the
+ * bot may only write to people who wrote to it first. Anyone may find a bot and write to it, so
+ * only a private message with the code counts, whatever else waits in the bot's queue.
+ * Long-polls `getUpdates` until `waitMs`.
  */
-export async function telegramFindChat(token: string, waitMs = 120_000, fetchImpl: typeof fetch = fetch, signal?: AbortSignal): Promise<string | undefined> {
+export async function telegramFindChat(
+  token: string,
+  code: string,
+  waitMs = 120_000,
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<TelegramChat | undefined> {
+  if (!/^\d{6}$/.test(code)) return undefined;
   const until = Date.now() + waitMs;
+  const hasCode = new RegExp(`(^|\\D)${code}(\\D|$)`);
   let offset: number | undefined;
   while (Date.now() < until && !signal?.aborted) {
     const timeout = Math.max(1, Math.min(25, Math.round((until - Date.now()) / 1000)));
     const askedAt = Date.now();
-    let updates: { update_id: number; message?: { chat?: { id?: number; type?: string } } }[] = [];
+    let updates: TelegramUpdate[] = [];
     try {
       const res = await fetchImpl(`https://api.telegram.org/bot${token}/getUpdates?timeout=${timeout}${offset !== undefined ? `&offset=${offset}` : ''}`, {
         signal: AbortSignal.timeout((timeout + 10) * 1000),
       });
       if (!res.ok) return undefined;
-      updates = ((await res.json()) as { result?: typeof updates }).result ?? [];
+      const result = ((await res.json()) as { result?: unknown }).result;
+      updates = Array.isArray(result) ? result.filter((u): u is TelegramUpdate => typeof u?.update_id === 'number') : [];
     } catch {
       await new Promise((r) => setTimeout(r, 2_000));
       continue;
     }
-    const chat = [...updates].reverse().find((u) => u.message?.chat?.type === 'private' && typeof u.message.chat.id === 'number')?.message?.chat?.id;
+    const hit = updates.find((u) => u.message?.chat?.type === 'private' && typeof u.message.chat.id === 'number' && typeof u.message.text === 'string' && hasCode.test(u.message.text));
     if (updates.length) offset = updates[updates.length - 1]!.update_id + 1;
-    if (chat !== undefined) {
-      // Acknowledge what was read, so the next setup does not find this message again.
+    if (hit) {
+      // Acknowledge what was read, so the next setup does not find these messages again.
       await fetchImpl(`https://api.telegram.org/bot${token}/getUpdates?timeout=0&offset=${offset}`, { signal: AbortSignal.timeout(10_000) }).catch(() => undefined);
-      return String(chat);
+      const chat = hit.message!.chat!;
+      return { id: String(chat.id), name: chatName(chat) };
     }
     // A server that answers at once instead of waiting is asked again a second later.
     if (Date.now() - askedAt < 1_000) await new Promise((r) => setTimeout(r, 1_000));
@@ -502,6 +553,47 @@ function clip(text: string, max: number): string {
 
 type Kind = 'needs-you' | 'error' | 'finished' | 'paused' | 'gone' | 'trouble' | 'quiet' | 'loop' | 'step';
 
+/** Approvals said by their kind: the command, file or address an agent names stays on the computer. */
+const APPROVAL_KINDS = lookupTable<string>({
+  run: 'run a command',
+  bash: 'run a command',
+  shell: 'run a command',
+  command: 'run a command',
+  powershell: 'run a command',
+  edit: 'edit a file',
+  write: 'edit a file',
+  patch: 'edit a file',
+  read: 'read a file',
+  fetch: 'open a web page',
+  webfetch: 'open a web page',
+});
+
+/**
+ * A status line as it may leave the computer. An approval can name a command, a file or an
+ * address ("Needs approval: run curl -H 'Authorization: …'"); a notification says only which
+ * kind of approval it is ("Needs approval: run a command").
+ */
+export function phoneStatus(detail: string | undefined): string | undefined {
+  if (detail === undefined) return undefined;
+  const m = /^Needs approval:[ \t]*([A-Za-z][\w-]{0,40})?/.exec(detail);
+  if (!m) return detail;
+  const word = m[1];
+  if (!word) return 'Needs approval';
+  // Lower-case words are the agents' approval kinds ("bash …", "run …"); a tool name such as "Bash" stays as it is.
+  return `Needs approval: ${APPROVAL_KINDS[word] ?? word}`;
+}
+
+/**
+ * The agent's name as it may leave the computer. A repository's progress file names its agent
+ * itself; a name that reads as a sentence or an address ("Your account is locked, see …") is not
+ * an agent's name, and the push says "An agent".
+ */
+export function pushAgentLabel(s: Pick<AgentSession, 'agent' | 'agentLabel'>): string {
+  if (s.agent !== 'progress-file') return s.agentLabel;
+  const name = s.agentLabel.trim();
+  return /^[\p{L}\p{N}][\p{L}\p{N} +_-]{0,23}$/u.test(name) && name.split(/\s+/).length <= 3 ? name : 'An agent';
+}
+
 /**
  * The words of a push. Without details, no project, task or step names leave the computer;
  * a session title taken from the person's own first message never does.
@@ -512,7 +604,7 @@ export function formatPush(
   details: boolean,
   extra: { workedMs?: number; quietMs?: number; action?: boolean; now?: number } = {},
 ): PhonePush {
-  const agent = s.agentLabel;
+  const agent = pushAgentLabel(s);
   const where = details ? ` · ${projectName(s.projectPath)}` : '';
   const p = progressOf(s.tasks);
   const step = currentTask(s.tasks);
@@ -526,7 +618,8 @@ export function formatPush(
       return {
         event: 'needs-you',
         title: `${agent} needs you${where}`,
-        message: lines(details ? clip(s.statusDetail ?? 'Waiting for your answer', 200) : 'Waiting for your answer', title, planLine),
+        // A progress file's note is a repository's words, not an agent's question: it stays on the computer.
+        message: lines(details && s.agent !== 'progress-file' ? clip(phoneStatus(s.statusDetail) ?? 'Waiting for your answer', 200) : 'Waiting for your answer', title, planLine),
         priority: 4,
         tags: ['bell'],
       };
@@ -574,7 +667,8 @@ export function formatPush(
     }
     case 'loop': {
       const l = s.loop;
-      const what = l ? (details ? `“${clip(l.detail ?? l.label, 80)}”` : 'The same action') : 'An action';
+      // The agent's own words for the action ("Run the tests"), never its command line or file.
+      const what = l ? (details ? `“${clip(l.label, 80)}”` : 'The same action') : 'An action';
       const facts = l
         ? [`failed ${l.count} times in a row${l.sameError ? ' with the same error' : ''}`, `for ${fmtDuration((extra.now ?? Date.now()) - l.since)}`, l.tokens ? `${fmtTokens(l.tokens)} tokens` : undefined]
         : ['keeps failing'];

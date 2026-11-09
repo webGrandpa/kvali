@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { ProgressFileAdapter } from '../src/adapters/progress-file.ts';
@@ -260,6 +260,22 @@ test('Hook hub stores sanitized live state and rejects unsafe input', async () =
   assert.equal(live.prompt, undefined, 'prompts are never stored');
 
   assert.equal((await post({ session_id: 'x' }, 'text/plain')).status, 404);
+  // A type a web page may send anywhere without asking, with "application/json" only as a parameter.
+  assert.equal((await post({ session_id: 'x' }, 'text/plain; x=application/json')).status, 404);
+  assert.equal((await post({ session_id: 'x' }, 'Application/JSON; charset=utf-8')).status, 200, 'the type, in any case, with parameters');
+  if (process.platform !== 'win32') {
+    const mode = (p: string) => statSync(p).mode & 0o777;
+    assert.equal(mode(path.join(liveDir, 'claude-code', 'abc-123.json')), 0o600, 'live files are readable by their owner only');
+  }
+
+  // A request from a web page: browsers name the page it comes from.
+  const fromPage = (headers: Record<string, string>) =>
+    fetch(`http://127.0.0.1:${port}/v1/events/claude-code`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify({ session_id: 'page-1', hook_event_name: 'Notification', message: 'Click here' }) });
+  assert.equal((await fromPage({ Origin: 'https://attacker.example' })).status, 403);
+  assert.equal((await fromPage({ Origin: 'null' })).status, 403);
+  assert.equal((await fromPage({ 'Sec-Fetch-Site': 'cross-site' })).status, 403);
+  assert.throws(() => readFileSync(path.join(liveDir, 'claude-code', 'page-1.json')), 'nothing from a page is stored');
+
   assert.equal(normalizeHookPayload('claude-code', { session_id: '../../etc/passwd' }), undefined);
   hub.dispose();
 });
@@ -294,6 +310,11 @@ test('redactPaths keeps file paths out of bug reports', () => {
   assert.equal(redactPaths('cannot read C:\\Users\\ana\\.codex\\sessions\\x.jsonl: busy'), 'cannot read <path>: busy');
   assert.equal(redactPaths('watching ~/.kvali/live failed'), 'watching <path> failed');
   assert.equal(redactPaths('Unexpected token } in JSON at position 5'), 'Unexpected token } in JSON at position 5');
+  // A user name with a space in it: the home folder goes whole, no word of it is left.
+  const home = '/Users/Ana Maria';
+  assert.equal(redactPaths("ENOENT: no such file, open '/Users/Ana Maria/.codex/sessions/x.jsonl'", home), "ENOENT: no such file, open '<path>'");
+  assert.equal(redactPaths('cannot watch /Users/Ana Maria', home), 'cannot watch <path>');
+  assert.equal(redactPaths('C:\\Users\\Ana Maria\\.claude\\x.json is busy', 'C:\\Users\\Ana Maria'), '<path> is busy');
 });
 
 test('Engine isolates a failing adapter', async () => {

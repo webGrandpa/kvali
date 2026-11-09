@@ -15,6 +15,7 @@
  */
 import path from 'node:path';
 import type { Adapter, AdapterContext } from '../adapter.ts';
+import { isolated } from '../adapter.ts';
 import type { Activity, AgentSession, DailyUsage, TaskItem } from '../model.ts';
 import { progressOf } from '../model.ts';
 import { parseChecklist } from '../util/checklist.ts';
@@ -176,14 +177,16 @@ export class AntigravityAdapter implements Adapter {
     }
     const out: AgentSession[] = [];
     for (const st of this.tracked.values()) {
-      await st.tail.read(
-        (rec) => this.onStep(st, rec, ctx),
-        () => {
-          Object.assign(st, this.blank(st.id, st.dir), { tail: st.tail });
-        },
-      );
-      await this.readTask(st);
-      const s = this.toSession(st, ctx);
+      const s = await isolated(ctx, `[antigravity] ${st.id}`, async () => {
+        await st.tail.read(
+          (rec) => this.onStep(st, rec, ctx),
+          () => {
+            Object.assign(st, this.blank(st.id, st.dir), { tail: st.tail });
+          },
+        );
+        await this.readTask(st);
+        return this.toSession(st, ctx);
+      });
       if (s) out.push(s);
     }
     return out;
@@ -325,7 +328,7 @@ export class AntigravityAdapter implements Adapter {
     const meta = await readJsonSafe<Record<string, unknown>>(path.join(st.dir, 'task.md.metadata.json'));
     st.task = {
       mtimeMs: s.mtimeMs,
-      title: parsed?.title?.replace(/\s*[—–-]\s*Task Tracker\s*$/i, '').trim() || undefined,
+      title: (parsed?.title !== undefined ? withoutTrackerSuffix(parsed.title) : undefined) || undefined,
       tasks: parsed?.tasks ?? [],
       summary: typeof meta?.summary === 'string' ? meta.summary : undefined,
     };
@@ -401,4 +404,12 @@ export class AntigravityAdapter implements Adapter {
       sources: [path.join(st.dir, 'task.md'), st.tail.path],
     };
   }
+}
+
+/** "Fix the cart — Task Tracker" → "Fix the cart", read without a regex that long titles could slow down. */
+function withoutTrackerSuffix(title: string): string {
+  const s = title.trim();
+  if (!s.toLowerCase().endsWith('task tracker')) return s;
+  const rest = s.slice(0, -'task tracker'.length).trimEnd();
+  return /[—–-]$/.test(rest) ? rest.slice(0, -1).trim() : s;
 }

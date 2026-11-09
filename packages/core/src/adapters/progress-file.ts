@@ -10,17 +10,20 @@
  * Optional front matter: `agent`, `title`, `status` (working | waiting | blocked | done | idle | error), `model`.
  * The `kvali.addProgressProtocol` command adds the instructions to AGENTS.md.
  */
+import { promises as fsp, type Stats } from 'node:fs';
 import path from 'node:path';
 import type { Adapter, AdapterContext } from '../adapter.ts';
 import { staleness } from '../adapter.ts';
+import { pathWithin } from '../format.ts';
 import type { AgentSession, SessionStatus } from '../model.ts';
 import { progressOf } from '../model.ts';
 import { parseChecklist } from '../util/checklist.ts';
 import { listDir, readTextSafe, statSafe } from '../util/fs.ts';
 import { TaskTimer } from '../util/task-timer.ts';
-import { basename, truncate } from '../util/text.ts';
+import { basename, lookupTable, truncate } from '../util/text.ts';
 
-const STATUS_WORDS: Record<string, SessionStatus> = {
+// No prototype: `status: constructor` in a repository's file is not a status.
+const STATUS_WORDS = lookupTable<SessionStatus>({
   working: 'working',
   running: 'working',
   in_progress: 'working',
@@ -33,7 +36,20 @@ const STATUS_WORDS: Record<string, SessionStatus> = {
   paused: 'idle',
   error: 'error',
   failed: 'error',
-};
+});
+
+/** Progress files read per workspace, the most recently written first: one per agent, not a folder of thousands. */
+export const MAX_PROGRESS_FILES = 20;
+/** Names looked at in `.agents/progress/`, a bound on the work a large folder can make. */
+const MAX_LISTED = 500;
+
+async function realpathSafe(p: string): Promise<string | undefined> {
+  try {
+    return await fsp.realpath(p);
+  } catch {
+    return undefined;
+  }
+}
 
 export class ProgressFileAdapter implements Adapter {
   readonly id = 'progress-file';
@@ -43,20 +59,31 @@ export class ProgressFileAdapter implements Adapter {
   private readonly timers = new Map<string, TaskTimer>();
 
   async poll(ctx: AdapterContext): Promise<AgentSession[]> {
-    const files: { file: string; root: string }[] = [];
+    const files: { file: string; root: string; st: Stats }[] = [];
     for (const root of ctx.workspaceRoots) {
       const agentsDir = path.join(root, '.agents');
-      files.push({ file: path.join(agentsDir, 'progress.md'), root });
-      for (const f of await listDir(path.join(agentsDir, 'progress'))) {
-        if (f.isFile() && f.name.endsWith('.md')) files.push({ file: path.join(agentsDir, 'progress', f.name), root });
+      const names = [path.join(agentsDir, 'progress.md')];
+      for (const f of (await listDir(path.join(agentsDir, 'progress'))).slice(0, MAX_LISTED)) {
+        if (f.isFile() && f.name.endsWith('.md')) names.push(path.join(agentsDir, 'progress', f.name));
       }
+      const realRoot = await realpathSafe(root);
+      if (!realRoot) continue;
+      const found: { file: string; root: string; st: Stats }[] = [];
+      for (const file of names) {
+        const st = await statSafe(file);
+        if (!st || !st.isFile()) continue;
+        // A link to a file outside the workspace (a key, your notes) is not the workspace's progress.
+        const real = await realpathSafe(file);
+        if (!real || !pathWithin(real, realRoot)) continue;
+        found.push({ file, root, st });
+      }
+      found.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
+      files.push(...found.slice(0, MAX_PROGRESS_FILES));
     }
 
     const out: AgentSession[] = [];
     const seen = new Set<string>();
-    for (const { file, root } of files) {
-      const st = await statSafe(file);
-      if (!st || !st.isFile()) continue;
+    for (const { file, root, st } of files) {
       seen.add(file);
       let entry = this.cache.get(file);
       if (!entry || entry.mtimeMs !== st.mtimeMs) {

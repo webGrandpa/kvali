@@ -12,6 +12,7 @@ import { promises as fsp } from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
+import { writeFileSafely } from '../util/files.ts';
 
 export const DEFAULT_HOOK_PORT = 47821;
 const MAX_BODY = 1 << 20;
@@ -100,6 +101,11 @@ export class HookHub {
   private tryListen(): void {
     if (this.disposed) return;
     const server = http.createServer((req, res) => void this.handle(req, res));
+    // Hooks send one small request and wait at most two seconds: a slow or idle connection is not a hook.
+    server.headersTimeout = 5_000;
+    server.requestTimeout = 10_000;
+    server.keepAliveTimeout = 2_000;
+    server.maxConnections = 64;
     server.on('error', (err: NodeJS.ErrnoException) => {
       server.close();
       this.setHub(false);
@@ -124,8 +130,17 @@ export class HookHub {
     return host === `127.0.0.1:${port}` || host === `localhost:${port}` || host === `[::1]:${port}`;
   }
 
+  /**
+   * Browsers name the page a request comes from (`Origin`, `Sec-Fetch-Site`), even for requests a
+   * page may send to another site without asking (a form post, `fetch` with `no-cors`). Hooks run
+   * curl, which sends neither (nor does Node's `fetch`).
+   */
+  private fromBrowser(req: http.IncomingMessage): boolean {
+    return req.headers.origin !== undefined || req.headers['sec-fetch-site'] !== undefined;
+  }
+
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    if (!this.localHost(req)) {
+    if (!this.localHost(req) || this.fromBrowser(req)) {
       res.writeHead(403).end();
       return;
     }
@@ -136,8 +151,9 @@ export class HookHub {
       return;
     }
     const m = /^\/v1\/events\/([a-z-]+)$/.exec(url);
-    const type = String(req.headers['content-type'] ?? '');
-    if (req.method !== 'POST' || !m || !AGENTS.has(m[1]) || !type.includes('application/json')) {
+    // The type itself, not a parameter that names it: "text/plain; x=application/json" is a type a page may send anywhere.
+    const type = String(req.headers['content-type'] ?? '').split(';')[0]!.trim().toLowerCase();
+    if (req.method !== 'POST' || !m || !AGENTS.has(m[1]) || type !== 'application/json') {
       res.writeHead(404).end();
       return;
     }
@@ -174,11 +190,9 @@ export class HookHub {
 
   private async store(agent: string, ev: LiveEvent): Promise<void> {
     const dir = path.join(this.opts.liveDir, agent);
-    await fsp.mkdir(dir, { recursive: true });
-    const file = path.join(dir, `${ev.sessionId}.json`);
-    const tmp = `${file}.${process.pid}.tmp`;
-    await fsp.writeFile(tmp, JSON.stringify(ev));
-    await fsp.rename(tmp, file);
+    await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+    // Folders and messages of your sessions: readable by you only.
+    await writeFileSafely(path.join(dir, `${ev.sessionId}.json`), JSON.stringify(ev), 0o600);
   }
 }
 

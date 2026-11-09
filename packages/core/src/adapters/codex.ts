@@ -333,7 +333,7 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
       }
       if (windows.length) {
         st.rateLimits = windows;
-        for (const w of windows) this.limitBook.add(w, ts);
+        for (const w of windows) this.limitBook.add(w, ts, ctx.now());
       }
     }
   }

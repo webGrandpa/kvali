@@ -303,7 +303,8 @@ async function doRefresh($: Engine, force: boolean): Promise<void> {
   if (loop && rt.pushedLoopFor !== loop.since) {
     rt.pushedLoopFor = loop.since
     const u = await read($, usage)
-    quiet(push($, 'loop', { loop: { what: loop.detail ?? loop.label, count: loop.count, sameError: loop.sameError, forMs: now - loop.since, tokens: totalTokens(u) - loop.tokensAtStart || undefined } }))
+    // Claude's description of the command ("Run the tests"), never the command line itself.
+    quiet(push($, 'loop', { loop: { what: loop.label, count: loop.count, sameError: loop.sameError, forMs: now - loop.since, tokens: totalTokens(u) - loop.tokensAtStart || undefined } }))
   }
   if (rt.pendingPause && !rt.turnActive && now - rt.pendingPause.at >= ASK_PUSH_AFTER_MS) {
     const { workedMs, sequence } = rt.pendingPause

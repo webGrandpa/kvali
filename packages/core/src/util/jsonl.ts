@@ -1,6 +1,11 @@
 import { promises as fsp } from 'node:fs';
 
 const CHUNK_BYTES = 1 << 20; // 1 MiB
+/**
+ * A longer line is skipped, not held in memory: no record Kvali reads is this big, while a
+ * pasted log or an image in a transcript can be.
+ */
+export const MAX_LINE_BYTES = 8 << 20; // 8 MiB
 
 export interface TailResult {
   /** The file changed since the previous call. */
@@ -20,6 +25,8 @@ export interface TailResult {
  */
 export class JsonlTail {
   private offset = 0;
+  /** Inside a line longer than MAX_LINE_BYTES: skipping to its end. */
+  private skipping = false;
   private size = -1;
   private mtimeMs = -1;
   private ino: number | undefined;
@@ -52,6 +59,7 @@ export class JsonlTail {
     let reset = false;
     if (st.size < this.offset || (this.ino !== undefined && st.ino !== this.ino)) {
       this.offset = 0;
+      this.skipping = false;
       reset = true;
       onReset?.();
     }
@@ -62,19 +70,34 @@ export class JsonlTail {
     try {
       const chunk = Buffer.allocUnsafe(CHUNK_BYTES);
       let pos = this.offset;
-      let carry: Buffer = Buffer.alloc(0);
+      // The line not finished yet, in pieces: joined once, at its newline (no copying it over and over).
+      let parts: Buffer[] = [];
+      let partsLen = 0;
+      let skipping = this.skipping;
       while (pos < st.size) {
         const want = Math.min(chunk.length, st.size - pos);
         const { bytesRead } = await fh.read(chunk, 0, want, pos);
         if (bytesRead <= 0) break;
         pos += bytesRead;
-        const buf = carry.length ? Buffer.concat([carry, chunk.subarray(0, bytesRead)]) : chunk.subarray(0, bytesRead);
+        const buf = chunk.subarray(0, bytesRead);
         let start = 0;
         let nl: number;
         while ((nl = buf.indexOf(10, start)) !== -1) {
-          const line = buf.toString('utf8', start, nl).trim();
-          start = nl + 1;
           lines += 1;
+          const piece = buf.subarray(start, nl);
+          start = nl + 1;
+          if (skipping) {
+            skipping = false; // the end of a line too long to read
+            continue;
+          }
+          if (partsLen + piece.length > MAX_LINE_BYTES) {
+            parts = [];
+            partsLen = 0;
+            continue;
+          }
+          const line = (partsLen ? Buffer.concat([...parts, piece]) : piece).toString('utf8').trim();
+          parts = [];
+          partsLen = 0;
           if (!line) continue;
           let record: unknown;
           try {
@@ -82,12 +105,26 @@ export class JsonlTail {
           } catch {
             continue; // malformed line: skip, never crash the reader
           }
-          onRecord(record);
+          try {
+            onRecord(record);
+          } catch {
+            // A record its reader cannot take (an odd value where text was expected) is skipped:
+            // the reader moves on, so one line never hides the rest of the file.
+          }
         }
-        // Copy: `chunk` is reused by the next read.
-        carry = Buffer.from(buf.subarray(start));
+        if (!skipping && start < buf.length) {
+          if (partsLen + (buf.length - start) > MAX_LINE_BYTES) {
+            skipping = true;
+            parts = [];
+            partsLen = 0;
+          } else {
+            parts.push(Buffer.from(buf.subarray(start))); // a copy: `chunk` is reused by the next read
+            partsLen += buf.length - start;
+          }
+        }
       }
-      this.offset = pos - carry.length;
+      this.skipping = skipping;
+      this.offset = pos - partsLen;
     } finally {
       await fh.close();
     }

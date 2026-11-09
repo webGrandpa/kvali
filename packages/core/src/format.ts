@@ -111,10 +111,12 @@ export function projectName(p: string | undefined): string {
 /**
  * Replaces file paths in a message (an error's text, say) with `<path>`, so a bug report
  * names no user, folder or project. Paths of two or more parts: `/Users/ana/.codex/x.jsonl`,
- * `C:\Users\ana\x`, `~/.kvali/live`.
+ * `C:\Users\ana\x`, `~/.kvali/live`. `home`, the home folder, goes first, whole: a user name
+ * with a space in it ("/Users/Ana Maria/…") would otherwise leave a word behind.
  */
-export function redactPaths(text: string): string {
-  return text.replace(/(?:[A-Za-z]:|~)?(?:[\\/][^\s\\/'"`<>|:]+){2,}[\\/]?/g, '<path>');
+export function redactPaths(text: string, home?: string): string {
+  const t = home && home.length > 1 ? text.split(home).join('~') : text;
+  return t.replace(/(?:[A-Za-z]:|~)?(?:[\\/][^\s\\/'"`<>|:]+){2,}[\\/]?/g, '<path>').replace(/(^|[\s'"`(])~(?=$|[\s'"`:)])/g, '$1<path>');
 }
 
 export interface ProjectGroup {

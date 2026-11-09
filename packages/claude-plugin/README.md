@@ -20,7 +20,7 @@ With phone notifications set up (`kvali phone`, `kvali phone telegram`, `kvali p
 
 ## With the Kvali editor extension
 
-The plugin also writes a small heartbeat file per session to `~/.kvali/live/claude-code/<session>.mod.json`. The [Kvali extension](../../README.md) reads it, so its sidebar shows the same exact state for every Claude Code session on your machine, and it can tell "thinking for 6 minutes" from "Claude Code was closed or froze". The heartbeat never leaves your computer.
+The plugin also writes a small heartbeat file per session to `~/.kvali/live/claude-code/<session>.mod.json`: what the session is doing (the running action's short label and detail), the current step, and your plan usage. The [Kvali extension](../../README.md) reads it, so its sidebar shows the same exact state for every Claude Code session on your machine, and it can tell "thinking for 6 minutes" from "Claude Code was closed or froze". The heartbeat never leaves your computer.
 
 ## Install
 
@@ -41,6 +41,6 @@ claude plugin test packages/claude-plugin
 
 ## Privacy
 
-The plugin keeps its state on your computer and has no telemetry. It sends something only when you set up phone notifications: short status lines to the ntfy server, Telegram bot or Discord channel you chose, never code or prompts. [Privacy](https://github.com/webGrandpa/kvali/blob/main/PRIVACY.md) · [Security policy](https://github.com/webGrandpa/kvali/blob/main/SECURITY.md) · MIT License
+The plugin keeps its state on your computer and has no telemetry. It sends something only when you set up phone notifications: short status lines to the ntfy server, Telegram bot or Discord channel you chose, never code, prompts or command lines. [Privacy](https://github.com/webGrandpa/kvali/blob/main/PRIVACY.md) · [Security policy](https://github.com/webGrandpa/kvali/blob/main/SECURITY.md) · MIT License
 
 Kvali is an independent open-source project, not affiliated with or endorsed by Anthropic. Claude and Claude Code are trademarks of Anthropic, used only to say what this plugin works with.

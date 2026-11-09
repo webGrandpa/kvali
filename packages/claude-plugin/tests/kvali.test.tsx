@@ -725,7 +725,8 @@ test('going in circles: the same command failing the same way four times shows i
   expect((await ui.find({ type: 'Text', text: /^⟳/ }))?.text).toBe('⟳ Going in circles: “pnpm test” failed 4× in a row with the same error · 4m 02s')
   await ui.unmount()
   expect(pushes.map(p => [p.body.title, p.body.priority])).toEqual([['Claude Code is going in circles · w', 4]])
-  expect(pushes[0]!.body.message).toMatch(/^“pnpm test” failed 4 times in a row with the same error · for 3m 0\ds/)
+  expect(pushes[0]!.body.message).toMatch(/^“Run the tests” failed 4 times in a row with the same error · for 3m 0\ds/)
+  expect(JSON.stringify(pushes)).not.toContain('pnpm test') // the pane shows the command; the phone never gets it
   await clock.advance(60_000)
   expect(pushes).toHaveLength(1)
 })

@@ -15,6 +15,7 @@ import { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { HookStatus } from '../model.ts';
+import { writeFileSafely } from '../util/files.ts';
 import { readKvaliState, writeKvaliState } from './claude-plugin.ts';
 import { DEFAULT_HOOK_PORT } from './hub.ts';
 
@@ -122,11 +123,12 @@ async function writeWithBackup(file: string, before: string | undefined, setting
   await fsp.mkdir(path.dirname(file), { recursive: true });
   let backup: string | undefined;
   if (before !== undefined) {
+    // The settings can hold API keys in `env`: the copy is for its owner only.
     backup = `${file}.kvali-backup`;
-    await fsp.writeFile(backup, before);
+    await writeFileSafely(backup, before, 0o600);
   }
-  // Write in place (not temp + rename) so a symlinked settings.json, e.g. from a dotfiles repo, stays a symlink.
-  await fsp.writeFile(file, JSON.stringify(settings, null, 2) + '\n');
+  // Never half written (Claude Code would not start); a symlinked settings.json, e.g. from a dotfiles repo, stays a symlink.
+  await writeFileSafely(file, JSON.stringify(settings, null, 2) + '\n');
   return backup;
 }
 

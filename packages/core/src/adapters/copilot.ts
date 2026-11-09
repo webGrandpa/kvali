@@ -151,7 +151,7 @@ function permissionLabel(r: Record<string, any>): string {
 /** Copilot's checklist markers: `[ ]` pending, `[x]` done, `[-]`/`[~]`/`[/]` in progress. */
 function todoMarkdown(md: string): TaskItem[] {
   // Kvali's checklist parser reads `-`/`~` as cancelled; Copilot means "in progress".
-  return parseChecklist(md.replace(/^(\s*(?:[-*+]|\d+[.)])\s*)\[[-~]\]/gm, '$1[/]')).tasks;
+  return parseChecklist(md.replace(/^([ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]*)\[[-~]\]/gm, '$1[/]')).tasks;
 }
 
 function dbStatus(s: unknown): TaskStatus {

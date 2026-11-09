@@ -104,26 +104,68 @@ function isClaude46OrLater(key: string): boolean {
   return major > 4 || (major === 4 && minor >= 6);
 }
 
-function globToRegExp(glob: string): RegExp {
-  const escaped = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
-  return new RegExp(`^${escaped}$`, 'i');
+/**
+ * Whether `text` matches `glob` (`*` any run of characters, `?` one), ignoring case. A loop
+ * that steps back only to the last `*`, so no pattern makes it slow (a generated regex could).
+ */
+export function globMatch(glob: string, text: string): boolean {
+  const g = glob.toLowerCase();
+  const s = text.toLowerCase();
+  let gi = 0;
+  let si = 0;
+  let star = -1;
+  let mark = 0;
+  while (si < s.length) {
+    if (gi < g.length && (g[gi] === '?' || g[gi] === s[si])) {
+      gi += 1;
+      si += 1;
+    } else if (gi < g.length && g[gi] === '*') {
+      star = gi;
+      gi += 1;
+      mark = si;
+    } else if (star !== -1) {
+      gi = star + 1;
+      mark += 1;
+      si = mark;
+    } else return false;
+  }
+  while (gi < g.length && g[gi] === '*') gi += 1;
+  return gi === g.length;
+}
+
+const isPrice = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x) && x >= 0;
+
+/** A price from settings: numbers only, or no price (a typo must not turn every cost into NaN). */
+function customPrice(v: unknown, nested = false): ModelPrice | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const o = v as Record<string, unknown>;
+  if (!isPrice(o.input) || !isPrice(o.output)) return undefined;
+  const p: ModelPrice = { input: o.input, output: o.output, cacheRead: isPrice(o.cacheRead) ? o.cacheRead : 0 };
+  if (isPrice(o.cacheWrite5m)) p.cacheWrite5m = o.cacheWrite5m;
+  if (isPrice(o.cacheWrite1h)) p.cacheWrite1h = o.cacheWrite1h;
+  if (isPrice(o.fastMultiplier)) p.fastMultiplier = o.fastMultiplier;
+  if (!nested && o.longPrompt && typeof o.longPrompt === 'object') {
+    const t = (o.longPrompt as Record<string, unknown>).threshold;
+    const tier = customPrice(o.longPrompt, true);
+    if (tier && isPrice(t)) p.longPrompt = { ...tier, threshold: t };
+  }
+  return p;
 }
 
 export class Pricing {
-  private readonly custom: { re: RegExp; price: ModelPrice }[];
+  private readonly custom: { glob: string; price: ModelPrice }[];
 
   constructor(customPrices: Record<string, Partial<ModelPrice>> = {}) {
-    this.custom = Object.entries(customPrices)
-      .filter(([, v]) => v && typeof v.input === 'number' && typeof v.output === 'number')
-      .map(([k, v]) => ({
-        re: globToRegExp(k),
-        price: { cacheRead: 0, ...v } as ModelPrice,
-      }));
+    this.custom = [];
+    for (const [glob, v] of Object.entries(customPrices ?? {})) {
+      const price = customPrice(v);
+      if (price) this.custom.push({ glob, price });
+    }
   }
 
   find(model: string | undefined): { price: ModelPrice; key: string } | undefined {
     if (!model) return undefined;
-    for (const c of this.custom) if (c.re.test(model)) return { price: c.price, key: model };
+    for (const c of this.custom) if (globMatch(c.glob, model)) return { price: c.price, key: model };
     const key = anthropicModelKey(model);
     if (key && ANTHROPIC_PRICES[key]) return { price: ANTHROPIC_PRICES[key], key };
     return undefined;

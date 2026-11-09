@@ -14,6 +14,7 @@ import type { AgentId, AgentSession, Snapshot } from './model.ts';
 import { STATUS_PRIORITY } from './model.ts';
 import { pathWithin } from './format.ts';
 import { Pricing } from './pricing.ts';
+import { cleanFields, cleanText } from './util/text.ts';
 
 export interface EngineOptions {
   adapters?: Adapter[];
@@ -60,6 +61,48 @@ export function createDefaultAdapters(opts: Pick<EngineOptions, 'extraAntigravit
 const sameProject = (a?: string, b?: string) => !!a && !!b && (pathWithin(a, b) || pathWithin(b, a));
 
 /**
+ * A session's texts made safe to show (see cleanText): titles, steps, actions and messages come
+ * from agents' and repositories' files. Ids, paths and file names stay as they are.
+ */
+export function cleanSession(s: AgentSession): AgentSession {
+  const out = cleanFields(s, { title: 500, agentLabel: 60, model: 80, agentVersion: 40, statusDetail: 500 });
+  const tasks = s.tasks.map((t) => cleanFields(t, { title: 500, activeTitle: 500, group: 200 }));
+  const activity = s.activity && cleanFields(s.activity, { label: 200, detail: 500 });
+  const recent = s.recent?.map((a) => cleanFields(a, { label: 200, detail: 500 }));
+  const loop = s.loop && cleanFields(s.loop, { label: 200, detail: 500 });
+  const trouble = s.trouble && cleanFields(s.trouble, { message: 500 });
+  const pulse = s.pulse && cleanFields(s.pulse, { label: 200, detail: 500 });
+  const rateLimits = s.rateLimits?.map((w) => cleanFields(w, { label: 40 }));
+  const changed =
+    out !== s ||
+    tasks.some((t, i) => t !== s.tasks[i]) ||
+    activity !== s.activity ||
+    (recent !== undefined && recent.some((a, i) => a !== s.recent![i])) ||
+    loop !== s.loop ||
+    trouble !== s.trouble ||
+    pulse !== s.pulse ||
+    (rateLimits !== undefined && rateLimits.some((w, i) => w !== s.rateLimits![i]));
+  if (!changed) return s;
+  return {
+    ...out,
+    tasks,
+    ...(activity && { activity }),
+    ...(recent && { recent }),
+    ...(loop && { loop }),
+    ...(trouble && { trouble }),
+    ...(pulse && { pulse }),
+    ...(rateLimits && { rateLimits }),
+  };
+}
+
+/** An agent's limits with their labels made safe to show (see cleanSession). */
+function cleanLimits(l: AgentLimits): AgentLimits {
+  const agentLabel = cleanText(l.agentLabel, 60);
+  const windows = l.windows.map((w) => cleanFields(w, { label: 40 }));
+  return agentLabel === l.agentLabel && windows.every((w, i) => w === l.windows[i]) ? l : { ...l, agentLabel, windows };
+}
+
+/**
  * An agent that Kvali reads natively sometimes also writes `.agents/progress.md`.
  * Show one card: the native session (live activity, tokens), borrowing the file's plan
  * only when the agent keeps no plan of its own.
@@ -69,12 +112,14 @@ export function mergeProgressFiles(sessions: AgentSession[]): AgentSession[] {
   const out = [...native];
   for (const pf of sessions) {
     if (pf.agent !== 'progress-file') continue;
-    const label = pf.agentLabel.toLowerCase();
+    // The file must name the agent ("Claude Code" or "Claude"): a word that only appears in its
+    // name ("a") would put a repository's text on that agent's card.
+    const label = pf.agentLabel.trim().toLowerCase();
     const match = native
       .filter((n) => {
         const name = n.agentLabel.toLowerCase();
         const short = name.split(' ')[0];
-        return (label.includes(short) || name.includes(label)) && sameProject(n.projectPath, pf.projectPath);
+        return (label === name || label === short) && sameProject(n.projectPath, pf.projectPath);
       })
       .sort((a, b) => b.updatedAt - a.updatedAt)[0];
     if (!match) {
@@ -138,7 +183,8 @@ export class Engine {
       workspaceRoots: opts.workspaceRoots ?? [],
       pricing: opts.pricing ?? new Pricing(),
       liveDir: opts.liveDir ?? defaultLiveDir(home),
-      log: opts.log ?? (() => {}),
+      // Messages can quote a broken file (a parser's error does): keep its escapes out of a terminal.
+      log: opts.log ? (m: string) => opts.log!(cleanText(m, 2_000)) : () => {},
     };
   }
 
@@ -189,7 +235,12 @@ export class Engine {
 
   private async loop(): Promise<void> {
     if (this.stopped) return;
-    await this.tick();
+    try {
+      await this.tick();
+    } catch (err) {
+      this.ctx.log(`tick failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // Always the next tick: one bad poll must not stop updates for good.
     if (this.stopped) return;
     this.timer = setTimeout(() => void this.loop(), this.intervalMs);
   }
@@ -209,17 +260,18 @@ export class Engine {
           const l = a.limits?.(this.ctx);
           if (l?.windows.length) limits.push(l);
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
+          const message = cleanText(err instanceof Error ? err.message : String(err), 500);
           errors.push({ agent: a.id, message });
           this.ctx.log(`[${a.id}] ${message}`);
         }
       }
-      const merged = mergeProgressFiles(sessions);
+      const merged = mergeProgressFiles(sessions).map(cleanSession);
+      const shown = limits.map(cleanLimits);
       sortSessions(merged);
-      const signature = JSON.stringify([merged, errors, limits]);
+      const signature = JSON.stringify([merged, errors, shown]);
       if (signature !== this.lastSignature) {
         this.lastSignature = signature;
-        this.current = { generatedAt: this.ctx.now(), sessions: merged, errors, ...(limits.length ? { limits } : {}) };
+        this.current = { generatedAt: this.ctx.now(), sessions: merged, errors, ...(shown.length ? { limits: shown } : {}) };
         for (const l of this.listeners) {
           try {
             l(this.current);

@@ -10,7 +10,7 @@
  *   kvali watch                no dashboard: hooks and phone notifications only
  *   kvali week                 the last seven days, to share
  */
-import { writeFile } from 'node:fs/promises';
+import { lstat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -45,6 +45,8 @@ import {
   PhoneNotifier,
   telegramBot,
   telegramFindChat,
+  telegramPairCode,
+  telegramStartLink,
   discordCheck,
   channelNames,
   DEFAULT_NTFY_SERVER,
@@ -75,9 +77,10 @@ import {
   type PhoneConfig,
   type PhoneEvent,
   type Snapshot,
+  secureKvaliHome,
 } from '@kvali/core';
 
-const VERSION = '0.7.1';
+const VERSION = '0.7.2';
 
 interface Options {
   json: boolean;
@@ -139,18 +142,25 @@ function parse(argv: string[]): { cmd: string[]; opts: Options } {
       case '--here':
         opts.project = process.cwd();
         break;
-      case '--window':
-        opts.windowHours = Number(next());
+      case '--window': {
+        const hours = Number(next());
+        if (!Number.isFinite(hours) || hours <= 0 || hours > 24 * 365) fail('--window takes a number of hours, e.g. 24');
+        opts.windowHours = hours;
         break;
+      }
       case '--home':
         opts.home = path.resolve(next());
         break;
       case '--brain-dir':
         opts.brainDirs.push(path.resolve(next()));
         break;
-      case '--port':
-        opts.port = Number(next());
+      case '--port': {
+        // It goes into Claude Code's settings as part of the hook command: only a real port.
+        const port = Number(next());
+        if (!Number.isInteger(port) || port < 1 || port > 65535) fail('--port takes a port number from 1 to 65535');
+        opts.port = port;
         break;
+      }
       case '--no-hub':
         opts.hub = false;
         break;
@@ -441,6 +451,8 @@ async function week(opts: Options, svgFile: string | undefined): Promise<void> {
   );
   if (svgFile !== undefined) {
     const file = path.resolve(svgFile || `kvali-week-${w.days[w.days.length - 1]!.day}.svg`);
+    // Never through a link: a repository could plant one under the default name to overwrite another file.
+    if ((await lstat(file).catch(() => undefined))?.isSymbolicLink()) fail(`${file} is a symbolic link; give the card another file name`);
     await writeFile(file, weekSvg(w));
     console.log(`\n  Card: ${file} ${c.gray('(1200×630 SVG; open it in a browser to save as PNG)')}`);
   }
@@ -541,10 +553,13 @@ async function phoneChannel(which: 'telegram' | 'discord', off: boolean, opts: O
     const token = await askSecret('  Token: ');
     const me = await telegramBot(token);
     if (!me.ok) fail(`could not use this bot: ${me.error}`);
-    console.log(`  3. Now send any message to @${me.username} (https://t.me/${me.username}). Waiting up to 3 minutes…`);
-    const chatId = await telegramFindChat(token, 180_000);
-    if (!chatId) fail(`no message reached @${me.username}; run \`kvali phone telegram\` again and write to the bot while Kvali waits`);
-    only = { telegram: { token, chatId, bot: me.username } };
+    // Anyone can write to a bot: the code tells Kvali which message is yours.
+    const code = telegramPairCode();
+    console.log(`  3. Open ${telegramStartLink(me.username, code)} and press Start, or send @${me.username} the code ${c.bold(code)}. Waiting up to 3 minutes…`);
+    const chat = await telegramFindChat(token, code, 180_000);
+    if (!chat) fail(`the code did not reach @${me.username}; run \`kvali phone telegram\` again and send it while Kvali waits`);
+    console.log(`  Kvali will write to ${c.bold(chat.name ?? 'this Telegram chat')} through @${me.username}.`);
+    only = { telegram: { token, chatId: chat.id, bot: me.username } };
   } else {
     console.log([c.bold('Kvali → Discord'), '', '  In Discord: Edit Channel → Integrations → Webhooks → New Webhook → Copy Webhook URL.', '  Paste it here (it stays on this computer):'].join('\n'));
     const webhook = await askSecret('  Webhook URL: ');
@@ -618,6 +633,7 @@ async function phone(sub: string | undefined, opts: Options, arg?: string): Prom
 
 async function main(): Promise<void> {
   const { cmd, opts } = parse(process.argv.slice(2));
+  await secureKvaliHome(opts.home);
   if (cmd[0] === 'hooks') return hooks(cmd[1], opts);
   if (cmd[0] === 'setup') {
     if (cmd[1] === 'off') {

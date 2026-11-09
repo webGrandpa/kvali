@@ -3,6 +3,28 @@ import type { AgentId, AgentSession } from './model.ts';
 import type { Pricing } from './pricing.ts';
 import { JsonlTail } from './util/jsonl.ts';
 
+const reported = new Set<string>();
+
+/**
+ * One session's update. If it fails (a file in a shape Kvali does not expect), that session is
+ * left out and the failure logged once; the agent's other sessions are still shown.
+ */
+export async function isolated<T>(ctx: AdapterContext, what: string, fn: () => Promise<T> | T): Promise<T | undefined> {
+  try {
+    return await fn();
+  } catch (err) {
+    const message = `${what}: ${err instanceof Error ? err.message : String(err)}`;
+    if (!reported.has(message)) {
+      if (reported.size >= 200) reported.clear();
+      reported.add(message);
+      ctx.log(message);
+    }
+    return undefined;
+  }
+}
+
+const fileName = (p: string): string => p.split(/[\\/]/).pop() ?? p;
+
 export interface AdapterContext {
   home: string;
   env: Record<string, string | undefined>;
@@ -85,14 +107,16 @@ export abstract class JsonlSessionAdapter<S> implements Adapter {
 
     const sessions: AgentSession[] = [];
     for (const [p, t] of this.tracked) {
-      const res = await t.tail.read(
-        (record) => this.onRecord(t.state, record, ctx),
-        () => {
-          t.state = this.createState(p);
-        },
-      );
-      await this.afterRead(t.state, ctx, res.changed);
-      const s = this.toSession(t.state, ctx);
+      const s = await isolated(ctx, `[${this.id}] ${fileName(p)}`, async () => {
+        const res = await t.tail.read(
+          (record) => this.onRecord(t.state, record, ctx),
+          () => {
+            t.state = this.createState(p);
+          },
+        );
+        await this.afterRead(t.state, ctx, res.changed);
+        return this.toSession(t.state, ctx);
+      });
       if (s) sessions.push(s);
     }
     return sessions;

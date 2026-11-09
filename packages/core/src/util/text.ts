@@ -13,12 +13,30 @@ export function truncate(text: string, max: number): string {
   return text.slice(0, Math.max(0, max - 1)).trimEnd() + '…';
 }
 
+const INJECTED_TAGS = ['system-reminder', 'local-command-stdout', 'local-command-stderr', 'command-message', 'command-args'];
+
+/** `text` without each `<tag>…</tag>` (or with only what is inside, `keep`). Scans once: no slow cases. */
+function removeTagged(text: string, tag: string, keep: boolean): string {
+  const open = `<${tag}>`;
+  const close = `</${tag}>`;
+  let out = '';
+  let pos = 0;
+  for (;;) {
+    const a = text.indexOf(open, pos);
+    if (a === -1) break;
+    const b = text.indexOf(close, a + open.length);
+    if (b === -1) break; // never closed: the rest stays as it is
+    out += text.slice(pos, a) + (keep ? text.slice(a + open.length, b) : '');
+    pos = b + close.length;
+  }
+  return out + text.slice(pos);
+}
+
 /** Removes XML-ish wrapper tags that agents inject into user turns (system reminders, command output). */
 export function stripInjectedTags(text: string): string {
-  return text
-    .replace(/<(system-reminder|local-command-stdout|local-command-stderr|command-message|command-args)>[\s\S]*?<\/\1>/g, '')
-    .replace(/<command-name>([\s\S]*?)<\/command-name>/g, '$1')
-    .trim();
+  let out = text;
+  for (const tag of INJECTED_TAGS) out = removeTagged(out, tag, false);
+  return removeTagged(out, 'command-name', true).trim();
 }
 
 /** Extracts plain text from Anthropic/Gemini-style content: a string, or an array of `{type:'text', text}` / `{text}` parts. */
@@ -55,4 +73,44 @@ export function summarizeCommand(cmd: unknown, max = 80): string | undefined {
 export function basename(p: string): string {
   const parts = p.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? p;
+}
+
+/**
+ * A lookup table keyed by names from agents' files: without a prototype, so a name such as
+ * "constructor" or "valueOf" is simply not in it.
+ */
+export function lookupTable<T>(entries: Record<string, T>): Readonly<Record<string, T>> {
+  return Object.freeze(Object.assign(Object.create(null) as Record<string, T>, entries));
+}
+
+// Terminal escape sequences: CSI (ESC [ … final byte), OSC (ESC ] … BEL or ESC \), any other ESC + one character.
+const ESCAPES = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-_]?/g;
+// Control characters but tab and newline (a carriage return can redraw a terminal line), DEL,
+// C1 controls, bidi overrides and isolates, zero-width characters, the line/paragraph separators.
+const INVISIBLE = /[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g;
+
+/**
+ * Text from an agent's or a repository's file made safe to show in a terminal, a notification
+ * or a card: no escape sequences a terminal would act on (write the clipboard, clear the
+ * screen, retitle the window), no control or invisible characters, no bidi overrides that make
+ * text read differently from what it is; at most `max` characters. Ordinary text is unchanged.
+ */
+export function cleanText(text: string, max = 1_000): string {
+  const t = text.replace(ESCAPES, '').replace(INVISIBLE, '');
+  return t.length > max ? truncate(t, max) : t;
+}
+
+/** `o` with the named string fields cleaned (see cleanText); the same object when nothing changed. */
+export function cleanFields<T extends object>(o: T, fields: Partial<Record<keyof T & string, number>>): T {
+  let out: T | undefined;
+  for (const [k, max] of Object.entries(fields) as [keyof T & string, number][]) {
+    const v = o[k];
+    if (typeof v !== 'string') continue;
+    const c = cleanText(v, max);
+    if (c !== v) {
+      out ??= { ...o };
+      (out as Record<string, unknown>)[k] = c;
+    }
+  }
+  return out ?? o;
 }
