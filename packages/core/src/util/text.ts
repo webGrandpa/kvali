@@ -114,3 +114,19 @@ export function cleanFields<T extends object>(o: T, fields: Partial<Record<keyof
   }
   return out ?? o;
 }
+
+/**
+ * A readable message from an error as an agent recorded it: a string, an Error-like object, or
+ * an API error body with its `error` nested inside. Never "[object Object]".
+ */
+export function errorMessage(v: unknown, depth = 0): string | undefined {
+  if (typeof v === 'string') return v.trim() || undefined;
+  if (typeof v === 'number') return String(v);
+  if (!v || typeof v !== 'object' || depth > 4) return undefined;
+  const o = v as Record<string, unknown>;
+  const inner = errorMessage(o.message, depth + 1) ?? errorMessage(o.error, depth + 1) ?? errorMessage(o.data, depth + 1) ?? errorMessage(o.cause, depth + 1);
+  const status = typeof o.status === 'number' ? o.status : undefined;
+  if (inner) return status && !inner.includes(String(status)) ? `${inner} (${status})` : inner;
+  if (typeof o.type === 'string' && o.type !== 'error') return o.type;
+  return status ? `API error ${status}` : undefined;
+}

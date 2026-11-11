@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.5 — 2026-11-11
+
+- **An API error Claude Code retries is no longer shown as the session's error.** When a request failed and Claude Code was about to try it again (an overloaded API, a dropped connection), the card said "Error" with "[object Object]" while Claude worked on. Now it stays "Working" and says what happened, such as "Overloaded (529)", with the attempt; only an error that ends the turn shows as an error, and once Claude works again the card follows. Error messages from Claude Code, Antigravity and Cline read as words, never "[object Object]".
+
 ## 0.7.4 — 2026-11-11
 
 - **A Claude Code turn that ends without last words ends on the card too.** When Claude finished a turn right after a tool, with nothing more to say, Claude Code wrote no last message, and Kvali kept the session "Working", then warned "No output for 22m… it may be stuck" while Claude was waiting for you. Kvali now ends the turn on Claude Code's own record of it, and where Kvali's Claude Code plugin runs, on the plugin's word that the turn ended.

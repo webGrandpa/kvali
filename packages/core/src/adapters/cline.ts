@@ -36,7 +36,7 @@ import { editorUserDataDirs } from '../util/editors.ts';
 import { findGitRoot, listDir, readJsonSafe, readTextSafe, statSafe } from '../util/fs.ts';
 import { LoopWatch, loopKey } from '../util/loop-watch.ts';
 import { TaskTimer } from '../util/task-timer.ts';
-import { contentText, firstLine, lookupTable, summarizeCommand, truncate } from '../util/text.ts';
+import { contentText, errorMessage, firstLine, lookupTable, summarizeCommand, truncate } from '../util/text.ts';
 import { addTaskDone, addWork, dayKey, parseTime } from '../util/time.ts';
 
 export interface UiMessage {
@@ -871,7 +871,7 @@ function sdkFailure(result: Record<string, any>): string | undefined {
   }
   if (!Array.isArray(content)) return undefined;
   const failed = content.find((c: any) => c && typeof c === 'object' && c.success === false);
-  return failed ? String(failed.error ?? failed.result ?? 'Command failed') : undefined;
+  return failed ? (errorMessage(failed.error) ?? errorMessage(failed.result) ?? 'Command failed') : undefined;
 }
 
 /** Strips the `<user_input mode="…">` wrapper the SDK puts around what the person typed. */

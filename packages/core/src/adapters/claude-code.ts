@@ -25,7 +25,7 @@ import { addTokens, emptyTokens, progressOf, totalTokens } from '../model.ts';
 import { findGitRoot, listDir, readJsonSafe, statSafe } from '../util/fs.ts';
 import { JsonlTail } from '../util/jsonl.ts';
 import { TaskTimer } from '../util/task-timer.ts';
-import { contentText, firstLine, stripInjectedTags, summarizeCommand, truncate } from '../util/text.ts';
+import { contentText, errorMessage, firstLine, stripInjectedTags, summarizeCommand, truncate } from '../util/text.ts';
 import { addTaskDone, addWork, dayKey, parseTime } from '../util/time.ts';
 import { LimitBook, claudeWindowLabel, type AgentLimits } from '../limits.ts';
 import { LoopWatch, loopKey } from '../util/loop-watch.ts';
@@ -456,13 +456,17 @@ export class ClaudeCodeAdapter implements Adapter {
           const err = o.error && typeof o.error === 'object' ? o.error : {};
           const attempt = Number(o.retryAttempt ?? o.attempt ?? err.retryAttempt) || undefined;
           const max = Number(o.maxRetries ?? o.max_retries ?? err.maxRetries) || undefined;
-          const message = firstLine(String(o.content ?? err.message ?? o.cause?.message ?? o.subtype ?? 'API problem'), 100);
+          const message = firstLine(errorMessage(o.content) ?? errorMessage(o.error) ?? errorMessage(o.cause) ?? 'API problem', 100);
           st.trouble = { message, at: ts ?? st.updatedAt, attempt, maxAttempts: max };
         }
-        if (o.level === 'error' || o.subtype === 'api_error') {
+        // A request that failed and is tried again (Claude Code's api_error, with its retry) is
+        // trouble, not the turn's end. When the retries run out, Claude Code writes the error as
+        // the model's message (isApiErrorMessage), and that ends the turn.
+        const retried = o.retryInMs !== undefined || o.retryAttempt !== undefined;
+        if ((o.level === 'error' || o.subtype === 'api_error') && !retried) {
           st.phase = 'error';
           st.phaseAt = ts ?? st.updatedAt;
-          st.errorText = firstLine(String(o.content ?? o.error ?? 'API error'), 120);
+          st.errorText = firstLine(errorMessage(o.content) ?? errorMessage(o.error) ?? 'API error', 120);
         }
         return;
       case 'attachment': {
@@ -922,7 +926,11 @@ export class ClaudeCodeAdapter implements Adapter {
         if (beat.phase === 'needs-you') {
           status = 'waiting';
           detail = beat.label ? `Needs you: ${truncate(beat.label, 80)}` : 'Needs your input';
-        } else if (status !== 'waiting' && status !== 'error') status = 'working';
+        } else if (status !== 'waiting' && (status !== 'error' || beat.since > st.phaseAt)) {
+          // The model works again after an error (a retry, a new prompt): the heartbeat is newer.
+          status = 'working';
+          detail = undefined;
+        }
       } else if (st.updatedAt <= beat.at + PULSE_FRESH_MS && (status === 'working' || status === 'waiting')) {
         // It was working, and both its heartbeat and its transcript went quiet: closed or frozen.
         pulse = { phase: 'gone', since: beat.at, at: beat.at };

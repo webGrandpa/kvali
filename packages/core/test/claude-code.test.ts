@@ -585,3 +585,36 @@ test('Claude Code: a notification that sets nothing going leaves the session idl
   clock.advance(3 * 60_000);
   assert.equal((await only(engine)).status, 'idle', 'no answer came: it was only shown');
 });
+
+test('Claude Code: an API error it retries is trouble, not an error, and every error reads as words', async () => {
+  const home = tmpHome();
+  const clock = new Clock('2026-11-11T09:00:00.000Z');
+  const file = path.join(home, '.claude', 'projects', '-work-shop', `${SID}.jsonl`);
+  // What Claude Code writes when a request fails and will be tried again: the API's error as an object.
+  const apiError = { status: 529, headers: {}, requestID: 'req_1', error: { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } } };
+  writeJsonl(file, [
+    { ...base(clock, 0), type: 'user', message: { role: 'user', content: 'Write the collections' } },
+    ...assistant(clock, 1_000, 'a', [{ type: 'tool_use', id: 'tu_1', name: 'Bash', input: { command: 'pnpm build', description: 'Build' } }], 'tool_use'),
+    toolResult(clock, 2_000, 'tu_1', 'ok'),
+    { ...base(clock, 3_000), type: 'system', subtype: 'api_error', level: 'error', error: apiError, retryInMs: 5_000, retryAttempt: 2, maxRetries: 10 },
+  ]);
+  clock.advance(5_000);
+  const engine = engineFor(new ClaudeCodeAdapter(), home, clock);
+  let s = await only(engine);
+  assert.equal(s.status, 'working', 'a retry, not the end of the turn');
+  assert.deepEqual(s.trouble && { message: s.trouble.message, attempt: s.trouble.attempt, max: s.trouble.maxAttempts }, { message: 'Overloaded (529)', attempt: 2, max: 10 });
+
+  // An error with no retry ends the turn, in words.
+  appendJsonl(file, [{ ...base(clock, 0), type: 'system', subtype: 'api_error', level: 'error', error: apiError }]);
+  clock.advance(1_000);
+  s = await only(engine);
+  assert.equal(s.status, 'error');
+  assert.equal(s.statusDetail, 'Overloaded (529)');
+  assert.ok(!JSON.stringify(s).includes('[object Object]'));
+
+  // The model works again (the plugin's heartbeat says so, newer than the error): working.
+  const beat = path.join(home, '.kvali', 'live', 'claude-code', `${SID}.mod.json`);
+  writeText(beat, JSON.stringify({ v: 1, agent: 'claude-code', sessionId: SID, at: clock.t, phase: 'thinking', since: clock.t - 500 }));
+  s = await only(engine);
+  assert.equal(s.status, 'working');
+});

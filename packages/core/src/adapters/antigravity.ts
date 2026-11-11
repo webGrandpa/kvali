@@ -21,7 +21,7 @@ import { progressOf } from '../model.ts';
 import { parseChecklist } from '../util/checklist.ts';
 import { findGitRoot, isWithin, listDir, readJsonSafe, readTextSafe, statSafe } from '../util/fs.ts';
 import { JsonlTail } from '../util/jsonl.ts';
-import { firstLine, truncate } from '../util/text.ts';
+import { errorMessage, firstLine, truncate } from '../util/text.ts';
 import { TaskTimer } from '../util/task-timer.ts';
 import { addTaskDone, addWork, parseTime } from '../util/time.ts';
 
@@ -283,7 +283,7 @@ export class AntigravityAdapter implements Adapter {
       st.turnStartedAt = at;
     }
     st.turnSteps += tools.length;
-    if (type === 'ERROR_MESSAGE') st.error = firstLine(String(o.content ?? o.error ?? 'Error'), 120);
+    if (type === 'ERROR_MESSAGE') st.error = firstLine(errorMessage(o.content) ?? errorMessage(o.error) ?? 'Error', 120);
     else if (source === 'MODEL') st.error = undefined;
 
     st.pendingAsk = undefined;
