@@ -662,6 +662,10 @@ test('time left: the plan\'s finished steps set the pace of the rest', async () 
   expect(planEtaMs(plan, now)).toBe(4 * 60_000 + 5 * 60_000)
   expect(fmtEta(planEtaMs(plan, now)!)).toBe('~9m left')
   expect(planEtaMs({ ...plan, durations: [] }, now)).toBeUndefined()
+  // A step a little past its usual time (5 min) is not done yet: a quarter of a step still counts.
+  expect(planEtaMs({ ...plan, step: { ...plan.step, startedAt: now - 6 * 60_000 } }, now)).toBe(1.25 * 60_000 + 5 * 60_000)
+  // One past twice its usual time: the earlier steps set no pace for it, so no estimate.
+  expect(planEtaMs({ ...plan, step: { ...plan.step, startedAt: now - 30 * 60_000 } }, now)).toBeUndefined()
 })
 
 test('plan limits: each measurement goes into the heartbeat with its recent readings, and the pane shows them', async ($, on) => {
@@ -776,4 +780,47 @@ test('Telegram and Discord: a turn keeps one message on each, edited silently an
   ])
   expect(pushes[5]!.body.text).toBe('✅ <b>Claude Code finished · w</b>\nDone in 2m 30s · 3/3 tasks')
   expect(pushes[7]!.body.embeds[0]).toMatchObject({ title: '✅ Claude Code finished · w', color: 0x3fb950 })
+})
+
+test("a subagent's plan stays its own: the session's progress follows the main loop", async ($, on) => {
+  mock.clock(on, { now: T0 })
+  mock.env(on, { HOME: '/home/u' })
+  // The engine keeps one task file per task, in a list it may share with subagents.
+  const files: Record<string, File> = {}
+  engine(on, files)
+  const path = (id: string) => `/home/u/.claude/tasks/s1/${id}.json`
+  let nextId = 1
+  on('tool.call', (_, e) => {
+    const input = e as unknown as Record<string, unknown>
+    if (e.tool === 'TaskCreate') {
+      const id = String(nextId++)
+      files[path(id)] = { text: JSON.stringify({ id, subject: input.subject, status: 'pending', blocks: [], blockedBy: [] }), mtimeMs: T0 }
+      return { result: { task: { id, subject: input.subject } } }
+    }
+    if (e.tool === 'TaskUpdate') {
+      const f = files[path(String(input.taskId))]
+      if (f) f.text = JSON.stringify({ ...JSON.parse(f.text), status: input.status })
+    }
+    return { result: {} }
+  })
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+  for (const subject of ['Read the repo', 'Agree the task', 'Branch and copy', 'Draw the cards', 'Check and open a PR']) {
+    await $.tool.call({ tool: 'TaskCreate', subject, description: subject })
+  }
+  for (const taskId of ['1', '2', '3']) await $.tool.call({ tool: 'TaskUpdate', taskId, status: 'completed' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '4', status: 'in_progress' })
+
+  // A subagent plans its own work: a TodoWrite list it finishes, and a task in the shared list.
+  const todos = ['Sketch', 'Colour', 'Engrave', 'Light', 'Crop', 'Export'].map(content => ({ content, status: 'completed', activeForm: content }))
+  await $.tool.call({ tool: 'TodoWrite', todos, agentId: 'a1' } as never)
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Export the cover', description: 'x', agentId: 'a1' } as never)
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '6', status: 'completed', agentId: 'a1' } as never)
+  // The main loop's next update reads the shared list again: the subagent's task stays out of it.
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '4', status: 'in_progress' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /\/\d+$/ }))?.text).toBe(' 3/5')
+  expect((await ui.find({ type: 'Text', text: /^Draw the cards/ }))?.text).toBe('Draw the cards')
+  expect(await ui.find({ type: 'Text', text: /Export the cover|Sketch/ })).toBeUndefined()
+  await ui.unmount()
 })

@@ -504,3 +504,34 @@ test('Claude Code: the plugin counts background agents exactly, a stop from the 
   assert.equal(s.status, 'idle');
   assert.equal(s.activity, undefined);
 });
+
+test("Claude Code: a subagent's own plan stays out of the session's, also from the shared task list", async () => {
+  const home = tmpHome();
+  const clock = new Clock('2026-11-10T19:00:00.000Z');
+  const dir = path.join(home, '.claude', 'projects', '-work-shop');
+  const created = (offset: number, n: number, subject: string) => [
+    ...assistant(clock, offset, `c${n}`, [{ type: 'tool_use', id: `tc${n}`, name: 'TaskCreate', input: { subject, description: subject } }], 'tool_use'),
+    toolResult(clock, offset + 10, `tc${n}`, `Task #${n} created successfully: ${subject}`, { task: { id: String(n), subject } }),
+  ];
+  writeJsonl(path.join(dir, `${SID}.jsonl`), [
+    { ...base(clock, 0), type: 'user', message: { role: 'user', content: 'Draw the cards' } },
+    ...created(1_000, 1, 'Read the repo'),
+    ...created(2_000, 2, 'Draw the cards'),
+    ...assistant(clock, 3_000, 'u2', [{ type: 'tool_use', id: 'tu2', name: 'TaskUpdate', input: { taskId: '1', status: 'completed' } }], 'tool_use'),
+    toolResult(clock, 3_010, 'tu2', 'Updated task #1 status'),
+    ...assistant(clock, 4_000, 'ag', [{ type: 'tool_use', id: 'tu_ag', name: 'Task', input: { description: 'Draw', subagent_type: 'general-purpose' } }], 'tool_use'),
+  ]);
+  // The subagent makes a task of its own, and the engine keeps it in the session's list.
+  writeJsonl(path.join(dir, SID, 'subagents', 'agent-x1.jsonl'), [
+    ...assistant(clock, 5_000, 's1', [{ type: 'tool_use', id: 'sc3', name: 'TaskCreate', input: { subject: 'Export the cover', description: 'x' } }], 'tool_use'),
+    toolResult(clock, 5_010, 'sc3', 'Task #3 created successfully: Export the cover', { task: { id: '3', subject: 'Export the cover' } }),
+  ]);
+  const taskDir = path.join(home, '.claude', 'tasks', SID);
+  writeText(path.join(taskDir, '1.json'), JSON.stringify({ id: '1', subject: 'Read the repo', status: 'completed', blocks: [], blockedBy: [] }));
+  writeText(path.join(taskDir, '2.json'), JSON.stringify({ id: '2', subject: 'Draw the cards', status: 'in_progress', blocks: [], blockedBy: [] }));
+  writeText(path.join(taskDir, '3.json'), JSON.stringify({ id: '3', subject: 'Export the cover', status: 'completed', blocks: [], blockedBy: [] }));
+  clock.advance(6_000);
+  const s = await only(engineFor(new ClaudeCodeAdapter(), home, clock));
+  assert.deepEqual(s.tasks.map((t) => t.title), ['Read the repo', 'Draw the cards']);
+  assert.deepEqual(progressOf(s.tasks), { done: 1, inProgress: 1, total: 2, percent: 50 });
+});

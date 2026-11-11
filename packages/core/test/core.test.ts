@@ -463,8 +463,15 @@ test('planEta: the time left comes from the plan\'s own pace', () => {
   const s = { tasks, current: { taskId: '3', startedAt: now - 2 * 60_000, steps: 3, typicalMs: 6 * 60_000 } };
   assert.equal(planEta(s, now), 4 * 60_000 + 2 * 6 * 60_000);
   assert.equal(fmtEta(planEta(s, now)!), '~16m left');
-  // A step running long counts as nearly done, not as negative time.
-  assert.equal(planEta({ ...s, current: { ...s.current, startedAt: now - 20 * 60_000 } }, now), 2 * 6 * 60_000);
+  // A step a little past its usual time is not done yet: a quarter of a step still counts.
+  assert.equal(planEta({ ...s, current: { ...s.current, startedAt: now - 8 * 60_000 } }, now), 1.5 * 60_000 + 2 * 6 * 60_000);
+  // One past twice its usual time says the earlier steps set no pace for it: no guess, where
+  // before a 30-minute step of a plan whose steps took 1.5 minutes showed "~1m left".
+  assert.equal(planEta({ ...s, current: { ...s.current, startedAt: now - 20 * 60_000 } }, now), undefined);
+  assert.equal(
+    planEta({ tasks: [t('1', 'completed'), t('2', 'completed'), t('3', 'completed'), t('4', 'in_progress'), t('5', 'pending')], current: { taskId: '4', startedAt: now - 30 * 60_000, steps: 9, typicalMs: 90_000 } }, now),
+    undefined,
+  );
   // Nothing to measure by yet, no plan, or nothing left: no guess.
   assert.equal(planEta({ tasks, current: { taskId: '3', startedAt: now, steps: 0 } }, now), undefined);
   assert.equal(planEta({ tasks: [], current: s.current }, now), undefined);

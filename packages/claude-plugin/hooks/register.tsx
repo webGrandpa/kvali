@@ -14,6 +14,7 @@ import {
   STALL_MS,
   advance,
   applyPlanTool,
+  createdTaskId,
   baseName,
   autoPlanEnabled,
   ntfyBody,
@@ -163,6 +164,14 @@ type Runtime = {
   /** Agents whose run's end was heard: the engine's list may call one running a moment longer. */
   finished: Set<string>
   /**
+   * Tasks subagents made for their own work. Their plans are theirs, not the session's: a
+   * subagent's TodoWrite would otherwise replace the session's plan, and a task list the
+   * engine shares with them would add their steps to it.
+   */
+  foreignTasks: Set<string>
+  /** Teammates of an agent team: the task list they share with the session is the team's plan. */
+  teammates: Set<string>
+  /**
    * A task whose answer handed work to background agents: its end (the phone, the toast) waits
    * for theirs and for the turn their reports start. `idleSince`: all done, and nothing woke it.
    */
@@ -222,6 +231,8 @@ const fresh = (): Runtime => ({
   mode: undefined,
   background: new Map(),
   finished: new Set(),
+  foreignTasks: new Set(),
+  teammates: new Set(),
   held: undefined,
   limits: undefined,
   limitSamples: {},
@@ -446,7 +457,7 @@ async function taskFiles($: Engine): Promise<{ tasks: KvTask[]; times: Map<strin
       continue
     }
     const t = parseTaskFile(text, f.name.slice(0, -5))
-    if (!t) continue
+    if (!t || rt.foreignTasks.has(t.id)) continue
     tasks.push(t)
     times.set(t.id, f.mtimeMs)
   }
@@ -781,7 +792,14 @@ export const register: Register = on => {
       noteCall(rt.loops, loopKey(e.tool, describeTool(e.tool, input, rt.cwd)), describeTool(e.tool, input, rt.cwd), ran.isError === true ? resultText(ran.result) : undefined, end, totalTokens(await read($, usage)))
     }
     if (!isPlan) await update($, recent, list => endAction(list, id, end, ran.deny !== undefined || ran.isError === true))
-    else if (ran.deny === undefined && !ran.isError && e.tool !== 'TaskList' && e.tool !== 'TaskGet') {
+    else if (e.agentId && (e.tool === 'TodoWrite' || !rt.teammates.has(e.agentId))) {
+      // A subagent's plan is its own: the session's progress bar follows the main loop (and an
+      // agent team's shared list). Its tasks are left out of the list, should the engine share it.
+      if (e.tool === 'TaskCreate' && ran.deny === undefined && !ran.isError) {
+        const made = createdTaskId(ran.result)
+        if (made !== undefined) rt.foreignTasks.add(made)
+      }
+    } else if (ran.deny === undefined && !ran.isError && e.tool !== 'TaskList' && e.tool !== 'TaskGet') {
       const files = e.tool === 'TodoWrite' ? undefined : await taskFiles($)
       const current = await read($, plan)
       const tasks = files?.tasks ?? applyPlanTool(current.tasks, e.tool, input, ran.result)
@@ -869,6 +887,7 @@ export const register: Register = on => {
   on('agent.spawn', async ($, e, next) => {
     const r = await next(e)
     try {
+      if (e.isTeammate && r.agentId) rt.teammates.add(r.agentId)
       if (e.background && !e.parentAgentId && !e.isTeammate && !e.workflow && r.agentId) {
         rt.background.set(r.agentId, { label: e.description, startedAt: await $.clock.now() })
         quiet(refresh($))

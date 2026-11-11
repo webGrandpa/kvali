@@ -46,7 +46,17 @@ export function planEta(s: Pick<AgentSession, 'tasks' | 'current'>, now: number)
   const left = p.total - p.done;
   if (p.total === 0 || left <= 0) return undefined;
   const spent = s.current ? Math.max(0, now - s.current.startedAt) : 0;
-  return Math.max(0, typical - spent) + (left - 1) * typical;
+  return restOfPlan(typical, spent, left);
+}
+
+/**
+ * The time a plan still needs: what is left of the current step and a typical step for each
+ * after it. A step running past its usual time is not done yet, so some of it still counts; one
+ * running past twice its usual time is one the earlier steps say nothing about: no estimate.
+ */
+export function restOfPlan(typical: number, spent: number, left: number): number | undefined {
+  if (spent > 2 * typical) return undefined;
+  return Math.max(typical - spent, typical / 4) + (left - 1) * typical;
 }
 
 /** A time of day in the computer's own locale and time zone: "17:40" or "5:40 PM". */

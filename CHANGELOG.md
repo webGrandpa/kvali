@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.3 — 2026-11-10
+
+- **Time left no longer guesses for a step that runs long.** A step that had run for 30 minutes, in a plan whose earlier steps took a minute and a half, showed "~1m left": Kvali counted it as nearly done. Now a step past twice its usual time shows no estimate (the card still says it is slower than the earlier steps), and one just past its usual time still counts a quarter of a step. On the cards, in the status bar, `kvali`, the Claude Code pane and the phone.
+- **A subagent's plan no longer takes over the session's.** When a subagent Claude started kept a to-do list of its own, Kvali's Claude Code plugin showed that list as the session's plan ("6/6 · 100%" while the session was at 3 of 5), in its status line, its pane and the phone's progress notification. The plugin and the editor now follow the session's own plan, and leave out tasks a subagent adds to the session's task list. An agent team's shared list still counts.
+
 ## 0.7.2 — 2026-11-09
 
 A security release: an independent review of Kvali found ways a project's files, a web page or another program could misuse it. Each is fixed below, and kept fixed by tests.

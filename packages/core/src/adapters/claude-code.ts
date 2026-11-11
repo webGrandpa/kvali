@@ -73,6 +73,12 @@ interface ClaudeState {
   tasks: Map<string, TaskItem>;
   pendingCreates: Map<string, Omit<TaskItem, 'id'>>;
   taskDir?: { sig: string; tasks: TaskItem[] };
+  /**
+   * Tasks subagents made for their own work (and their TaskCreate calls still waiting for a
+   * result). A subagent's plan is not the session's, also when it lands in the session's task list.
+   */
+  foreignCreates: Set<string>;
+  foreignTasks: Set<string>;
   open: Map<string, Activity>;
   activity?: Activity;
   phase: Phase;
@@ -354,6 +360,8 @@ export class ClaudeCodeAdapter implements Adapter {
       maxContext: 0,
       tasks: new Map(),
       pendingCreates: new Map(),
+      foreignCreates: new Set(),
+      foreignTasks: new Set(),
       open: new Map(),
       phase: 'idle',
       phaseAt: 0,
@@ -376,7 +384,18 @@ export class ClaudeCodeAdapter implements Adapter {
     const ts = parseTime(o.timestamp);
 
     if (tokensOnly) {
-      if (o.type === 'assistant' && o.message) this.countUsage(st, o, ts, ctx, false);
+      if (o.type === 'assistant' && o.message) {
+        this.countUsage(st, o, ts, ctx, false);
+        for (const b of Array.isArray(o.message.content) ? o.message.content : []) {
+          if (b?.type === 'tool_use' && b.name === 'TaskCreate' && typeof b.id === 'string') st.foreignCreates.add(b.id);
+        }
+      } else if (o.type === 'user' && Array.isArray(o.message?.content) && st.foreignCreates.size) {
+        for (const b of o.message.content) {
+          if (b?.type !== 'tool_result' || !st.foreignCreates.delete(b.tool_use_id)) continue;
+          const id = o.toolUseResult?.task?.id ?? /Task #?(\w+) created/i.exec(contentText(b.content))?.[1];
+          if (id !== undefined && id !== null) st.foreignTasks.add(String(id));
+        }
+      }
       return;
     }
 
@@ -779,7 +798,8 @@ export class ClaudeCodeAdapter implements Adapter {
   }
 
   private resolveTasks(st: ClaudeState): TaskItem[] {
-    if (st.taskDir && st.taskDir.tasks.length > 0) return st.taskDir.tasks;
+    const own = st.taskDir?.tasks.filter((t) => !st.foreignTasks.has(t.id)) ?? [];
+    if (own.length > 0) return own;
     if (st.tasks.size > 0) {
       return [...st.tasks.values()].sort((a, b) => Number(a.id) - Number(b.id) || a.id.localeCompare(b.id));
     }

@@ -60,7 +60,8 @@ export function typicalMs(plan: KvPlan): number | undefined {
 
 /**
  * How long the rest of the plan should take at its own pace: the typical step for each step
- * left, less the time already spent on the current one. Undefined until a step has finished.
+ * left, less the time already spent on the current one. Undefined until a step has finished,
+ * and while the current step runs past twice its usual time.
  */
 export function planEtaMs(plan: KvPlan, now: number): number | undefined {
   const typical = typicalMs(plan)
@@ -69,7 +70,10 @@ export function planEtaMs(plan: KvPlan, now: number): number | undefined {
   const left = p.total - p.done
   if (!p.total || left <= 0) return undefined
   const spent = p.current && plan.step ? Math.max(0, now - plan.step.startedAt) : 0
-  return Math.max(0, typical - spent) + (left - 1) * typical
+  // A step past twice its usual time is one the earlier steps say nothing about: no estimate.
+  // One just past its usual time is not done yet: a quarter of a step still counts.
+  if (spent > 2 * typical) return undefined
+  return Math.max(typical - spent, typical / 4) + (left - 1) * typical
 }
 
 /** One usage window as Claude Code reports it (`session.measure`, `$.session.usage()`). */
@@ -156,6 +160,12 @@ export function sortTasks(tasks: KvTask[]): KvTask[] {
  * Applies a plan tool call to the task list. `input` is the call's arguments,
  * `result` the tool's structured result (TaskCreate answers the new id).
  */
+/** The id of the task a TaskCreate made, from its result. */
+export function createdTaskId(result: unknown): string | undefined {
+  const id = (result as { task?: { id?: unknown } } | undefined)?.task?.id
+  return id === undefined || id === null ? undefined : String(id)
+}
+
 export function applyPlanTool(tasks: readonly KvTask[], tool: string, input: Record<string, unknown>, result: unknown): KvTask[] {
   if (tool === 'TodoWrite' && Array.isArray(input.todos)) {
     return (input.todos as Record<string, unknown>[]).map((t, i) => ({
