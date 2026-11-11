@@ -535,3 +535,53 @@ test("Claude Code: a subagent's own plan stays out of the session's, also from t
   assert.deepEqual(s.tasks.map((t) => t.title), ['Read the repo', 'Draw the cards']);
   assert.deepEqual(progressOf(s.tasks), { done: 1, inProgress: 1, total: 2, percent: 50 });
 });
+
+test('Claude Code: a turn that ends with no last words still ends, by its own record or the plugin\'s', async () => {
+  const home = tmpHome();
+  const dir = path.join(home, '.claude', 'projects', '-work-shop');
+  // The model edits a file and ends its turn with nothing to say: no last message is written.
+  const turn = (clock: Clock) => [
+    { ...base(clock, 0), type: 'user', message: { role: 'user', content: 'Build the concept page' } },
+    ...assistant(clock, 1_000, 'a', [{ type: 'tool_use', id: 'tu_1', name: 'Edit', input: { file_path: '/work/shop/index.html', old_string: 'a', new_string: 'b' } }], 'tool_use'),
+    toolResult(clock, 2_000, 'tu_1', 'The file has been updated.'),
+  ];
+
+  // Claude Code records the turn's end itself.
+  for (const marker of [{ subtype: 'turn_duration', durationMs: 2_000, messageCount: 3 }, { subtype: 'stop_hook_summary', hookCount: 1, preventedContinuation: false }]) {
+    const clock = new Clock('2026-11-11T02:00:00.000Z');
+    const file = path.join(dir, `${SID}.jsonl`);
+    writeJsonl(file, [...turn(clock), { ...base(clock, 3_000), type: 'system', level: 'suggestion', ...marker }]);
+    clock.advance(10 * 60_000);
+    const s = await only(engineFor(new ClaudeCodeAdapter(), home, clock));
+    assert.equal(s.status, 'idle', marker.subtype);
+  }
+
+  // Without such a record, the plugin's heartbeat says the turn ended and nothing came after.
+  const clock = new Clock('2026-11-11T02:00:00.000Z');
+  writeJsonl(path.join(dir, `${SID}.jsonl`), turn(clock));
+  const beat = path.join(home, '.kvali', 'live', 'claude-code', `${SID}.mod.json`);
+  writeText(beat, JSON.stringify({ v: 1, agent: 'claude-code', sessionId: SID, at: clock.t + 2_500, phase: 'done', since: clock.t + 2_500 }));
+  clock.advance(10_000);
+  const engine = engineFor(new ClaudeCodeAdapter(), home, clock);
+  assert.equal((await only(engine)).status, 'working', 'right after the end, the transcript still has its say');
+  clock.advance(10 * 60_000);
+  const s = await only(engine);
+  assert.equal(s.status, 'idle', 'not "working, no output for 10 minutes"');
+});
+
+test('Claude Code: a notification that sets nothing going leaves the session idle', async () => {
+  const home = tmpHome();
+  const clock = new Clock('2026-11-11T02:00:00.000Z');
+  const file = path.join(home, '.claude', 'projects', '-work-shop', `${SID}.jsonl`);
+  writeJsonl(file, [
+    { ...base(clock, 0), type: 'user', message: { role: 'user', content: 'Serve it and check it' } },
+    ...assistant(clock, 1_000, 'a', [{ type: 'text', text: 'Checked.' }], 'end_turn'),
+    // A background command ends after the turn did; Claude Code shows it, and the model may not answer.
+    { ...base(clock, 60_000), type: 'user', message: { role: 'user', content: '<task-notification><task-id>b1</task-id><status>failed</status><summary>Background command "Serve the page" failed with exit code 144</summary></task-notification>' } },
+  ]);
+  clock.advance(90_000);
+  const engine = engineFor(new ClaudeCodeAdapter(), home, clock);
+  assert.equal((await only(engine)).status, 'working', 'the model may be answering it');
+  clock.advance(3 * 60_000);
+  assert.equal((await only(engine)).status, 'idle', 'no answer came: it was only shown');
+});

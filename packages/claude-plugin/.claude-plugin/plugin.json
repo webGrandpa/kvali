@@ -1,6 +1,6 @@
 {
   "name": "kvali",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "Live progress for Claude Code: plan progress, the current step and the time left, what the agent is doing right now, tokens and your plan limits, in a pane beside the chat.",
   "author": { "name": "Giorgi Khiladze" },
   "homepage": "https://github.com/webGrandpa/kvali",

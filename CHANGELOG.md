@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.4 — 2026-11-11
+
+- **A Claude Code turn that ends without last words ends on the card too.** When Claude finished a turn right after a tool, with nothing more to say, Claude Code wrote no last message, and Kvali kept the session "Working", then warned "No output for 22m… it may be stuck" while Claude was waiting for you. Kvali now ends the turn on Claude Code's own record of it, and where Kvali's Claude Code plugin runs, on the plugin's word that the turn ended.
+- A background command's result that arrives after a turn has ended, and that Claude does not answer, no longer keeps the session "Working": after two minutes with no answer it is idle again.
+
 ## 0.7.3 — 2026-11-10
 
 - **Time left no longer guesses for a step that runs long.** A step that had run for 30 minutes, in a plan whose earlier steps took a minute and a half, showed "~1m left": Kvali counted it as nearly done. Now a step past twice its usual time shows no estimate (the card still says it is slower than the earlier steps), and one just past its usual time still counts a quarter of a step. On the cards, in the status bar, `kvali`, the Claude Code pane and the phone.

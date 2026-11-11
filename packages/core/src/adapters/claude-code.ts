@@ -79,6 +79,10 @@ interface ClaudeState {
    */
   foreignCreates: Set<string>;
   foreignTasks: Set<string>;
+  /** The model's last message in the session's own loop. */
+  lastModelAt?: number;
+  /** A notification set the session going (background work reporting back) after its turn had ended. */
+  wokeAt?: number;
   open: Map<string, Activity>;
   activity?: Activity;
   phase: Phase;
@@ -143,6 +147,10 @@ interface PulseFile {
 /** The plugin rewrites its heartbeat at least every 10 s while a turn runs. */
 const PULSE_FRESH_MS = 30_000;
 const PULSE_ACTIVE = new Set<PulsePhase>(['requesting', 'thinking', 'writing', 'tool-input', 'running', 'needs-you', 'stalled']);
+/** What the plugin's heartbeat says once a turn has ended. */
+const PULSE_ENDED = new Set(['idle', 'done', 'interrupted', 'error']);
+/** A notification that set no answer going within this long was only shown, not answered. */
+const WAKE_GRACE_MS = 2 * 60_000;
 
 const WAITING_NOTIFICATIONS = new Set([
   'permission_prompt',
@@ -433,6 +441,17 @@ export class ClaudeCodeAdapter implements Adapter {
         return;
       case 'system':
         if (o.subtype === 'compact_boundary') st.context = undefined;
+        // The turn's end as Claude Code records it, whatever the model's last message was: one
+        // with nothing in it (the model ends with no words after a tool) is not written at all.
+        if (!o.isSidechain && (o.subtype === 'turn_duration' || (o.subtype === 'stop_hook_summary' && st.open.size === 0))) {
+          const at = ts ?? st.updatedAt;
+          if (st.phase === 'working' || st.phase === 'tool') {
+            st.phase = 'idle';
+            st.phaseAt = at;
+          }
+          st.open.clear();
+          if (st.turnOpen) this.endTurn(st, at, undefined);
+        }
         if (/error|retry/i.test(String(o.subtype ?? '')) || o.level === 'error' || o.level === 'warning') {
           const err = o.error && typeof o.error === 'object' ? o.error : {};
           const attempt = Number(o.retryAttempt ?? o.attempt ?? err.retryAttempt) || undefined;
@@ -511,6 +530,7 @@ export class ClaudeCodeAdapter implements Adapter {
       return;
     }
     if (typeof m.model === 'string' && m.model !== '<synthetic>') st.model = m.model;
+    st.lastModelAt = ts;
     this.countUsage(st, o, ts, ctx, true);
     if (m.model !== '<synthetic>') st.trouble = undefined;
 
@@ -653,6 +673,7 @@ export class ClaudeCodeAdapter implements Adapter {
       if (!st.turnOpen) {
         st.phase = 'working';
         st.phaseAt = ts;
+        st.wokeAt = ts;
         st.activity = { kind: 'thinking', label: 'Thinking', startedAt: ts };
       }
     }
@@ -831,6 +852,10 @@ export class ClaudeCodeAdapter implements Adapter {
       default:
         status = allDone ? 'done' : 'idle';
     }
+    // A notification after the turn had ended that set nothing going: it was only shown.
+    if (status === 'working' && !st.turnOpen && st.wokeAt === st.phaseAt && now - st.phaseAt > WAKE_GRACE_MS) {
+      status = allDone ? 'done' : 'idle';
+    }
 
     let lastSignal = st.updatedAt;
     // Where Kvali's plugin runs in the session its heartbeat is exact; the hooks, kept for Claude
@@ -904,6 +929,20 @@ export class ClaudeCodeAdapter implements Adapter {
         status = 'stale';
         detail = 'Claude Code stopped responding';
       }
+    } else if (
+      beat &&
+      beat.at >= st.startedAt &&
+      PULSE_ENDED.has(beat.phase) &&
+      status === 'working' &&
+      !background &&
+      beat.at >= (st.lastModelAt ?? 0) - 2_000 &&
+      now - beat.at > PULSE_FRESH_MS
+    ) {
+      // The plugin saw the turn end, and the model has written nothing since: the transcript
+      // only missed the end.
+      status = beat.phase === 'error' ? 'error' : allDone ? 'done' : 'idle';
+      if (beat.phase === 'interrupted') detail = 'Interrupted';
+      else if (beat.phase === 'error') detail = st.errorText ?? 'Stopped with an error';
     }
 
     if (status === 'working') {
