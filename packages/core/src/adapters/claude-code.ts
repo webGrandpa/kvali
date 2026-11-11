@@ -629,6 +629,9 @@ export class ClaudeCodeAdapter implements Adapter {
   private onUser(st: ClaudeState, o: Record<string, any>, ts: number): void {
     const m = o.message;
     if (!m || o.isSidechain) return;
+    // The summary a compaction writes in place of the conversation is no prompt: after /compact
+    // nobody has asked anything, and when the context fills up mid-turn the turn simply goes on.
+    if (o.isCompactSummary) return;
     const content = m.content;
 
     if (Array.isArray(content) && content.some((b: any) => b?.type === 'tool_result')) {

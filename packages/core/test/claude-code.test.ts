@@ -618,3 +618,44 @@ test('Claude Code: an API error it retries is trouble, not an error, and every e
   s = await only(engine);
   assert.equal(s.status, 'working');
 });
+
+test('Claude Code: a compaction is no prompt, after /compact or in the middle of a turn', async () => {
+  const home = tmpHome();
+  const clock = new Clock('2026-11-11T12:53:00.000Z');
+  const file = path.join(home, '.claude', 'projects', '-work-shop', `${SID}.jsonl`);
+  const summary = (offset: number) => ({
+    ...base(clock, offset),
+    type: 'user',
+    isCompactSummary: true,
+    isVisibleInTranscriptOnly: true,
+    message: { role: 'user', content: 'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.' },
+  });
+  // The agent finished, then the person ran /compact: Claude Code writes the summary as a user message.
+  writeJsonl(file, [
+    { ...base(clock, 0), type: 'user', origin: { kind: 'human' }, message: { role: 'user', content: 'Fix the scroll behaviour' } },
+    ...assistant(clock, 1_000, 'a', [{ type: 'text', text: 'The changes are ready.' }], 'end_turn'),
+    { ...base(clock, 60_000), type: 'user', message: { role: 'user', content: '<command-name>/compact</command-name>\n<command-message>compact</command-message>' } },
+    { ...base(clock, 90_000), type: 'system', subtype: 'compact_boundary', content: 'Conversation compacted', level: 'info' },
+    summary(90_100),
+    { ...base(clock, 90_200), type: 'user', message: { role: 'user', content: '<local-command-stdout>Compacted</local-command-stdout>' } },
+  ]);
+  clock.advance(22 * 60_000);
+  const engine = engineFor(new ClaudeCodeAdapter(), home, clock);
+  let s = await only(engine);
+  assert.equal(s.status, 'idle', 'not "Working, 0 steps, no output for 22 minutes"');
+  assert.equal(s.title, 'Fix the scroll behaviour', 'the summary is not the session\'s first prompt');
+
+  // The context filled up mid-turn: the turn goes on through the summary.
+  appendJsonl(file, [
+    { ...base(clock, 0), type: 'user', origin: { kind: 'human' }, message: { role: 'user', content: 'Now the header' } },
+    ...assistant(clock, 1_000, 'b', [{ type: 'tool_use', id: 'tu_h', name: 'Read', input: { file_path: '/work/shop/header.tsx' } }], 'tool_use'),
+    toolResult(clock, 2_000, 'tu_h', 'ok'),
+    { ...base(clock, 3_000), type: 'system', subtype: 'compact_boundary', content: 'Conversation compacted', level: 'info' },
+    summary(3_100),
+    ...assistant(clock, 4_000, 'c', [{ type: 'tool_use', id: 'tu_e', name: 'Edit', input: { file_path: '/work/shop/header.tsx', old_string: 'a', new_string: 'b' } }], 'tool_use'),
+  ]);
+  clock.advance(5_000);
+  s = await only(engine);
+  assert.equal(s.status, 'working');
+  assert.equal(s.turn?.steps, 2, 'one turn, both of its steps');
+});

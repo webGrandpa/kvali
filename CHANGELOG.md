@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.6 — 2026-11-11
+
+- **/compact no longer starts a turn that never ends.** After a compaction Claude Code writes a summary of the conversation as a user message. Kvali took it for a new prompt and showed the session "Working · 0 steps", then "No output for 22m… it may be stuck", though Claude had finished and nobody had asked anything. The summary no longer counts as a prompt or as the session's title, and a turn whose context fills up mid-way goes on as one turn.
+
 ## 0.7.5 — 2026-11-11
 
 - **An API error Claude Code retries is no longer shown as the session's error.** When a request failed and Claude Code was about to try it again (an overloaded API, a dropped connection), the card said "Error" with "[object Object]" while Claude worked on. Now it stays "Working" and says what happened, such as "Overloaded (529)", with the attempt; only an error that ends the turn shows as an error, and once Claude works again the card follows. Error messages from Claude Code, Antigravity and Cline read as words, never "[object Object]".
