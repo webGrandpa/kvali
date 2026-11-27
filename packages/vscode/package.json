@@ -2,7 +2,7 @@
   "name": "kvali",
   "displayName": "Kvali — AI Agent Progress Tracker",
   "description": "One progress bar for all your AI coding agents: plan progress, the current step, usage and alerts on your phone, grouped by project. Local and read-only.",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "publisher": "webgrandpa",
   "author": {
     "name": "Giorgi Khiladze",
@@ -236,6 +236,22 @@
           "scope": "application",
           "default": true,
           "description": "With the Claude Code hooks installed, ask Claude for a task list whenever a session has no unfinished plan (about 60 tokens per prompt, only while there is no plan). With Kvali's plugin it also keeps Claude Code's task tools in its tool list, so they are never hidden behind ToolSearch."
+        },
+        "kvali.keepAwake": {
+          "type": "string",
+          "scope": "application",
+          "enum": [
+            "whenPluggedIn",
+            "always",
+            "off"
+          ],
+          "enumDescriptions": [
+            "Keep the computer awake while an agent works, when it runs on mains power.",
+            "Keep the computer awake while an agent works, on battery too.",
+            "Never keep the computer awake."
+          ],
+          "default": "whenPluggedIn",
+          "markdownDescription": "Keep the computer from falling asleep while any agent works (Claude Code, Codex, Gemini CLI, Antigravity, Copilot, Cline, Roo Code, Kilo Code, OpenCode). It may sleep again a minute after the last one stops. Only idle sleep is held off: the display still turns off, and closing a laptop's lid still puts it to sleep."
         },
         "kvali.activeWindowHours": {
           "type": "number",

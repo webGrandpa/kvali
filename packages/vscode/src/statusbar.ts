@@ -30,12 +30,23 @@ function short(text: string, max: number): string {
 export class StatusBar {
   private readonly item = vscode.window.createStatusBarItem('kvali.status', vscode.StatusBarAlignment.Left, -10);
   private readonly limitItem = vscode.window.createStatusBarItem('kvali.limits', vscode.StatusBarAlignment.Left, -11);
+  private readonly awakeItem = vscode.window.createStatusBarItem('kvali.awake', vscode.StatusBarAlignment.Left, -12);
 
   constructor() {
     this.item.name = 'Kvali';
     this.item.command = 'kvali.show';
     this.limitItem.name = 'Kvali: plan limits';
     this.limitItem.command = 'kvali.show';
+    this.awakeItem.name = 'Kvali: keeping the computer awake';
+    this.awakeItem.text = '$(coffee)';
+    this.awakeItem.tooltip = 'Kvali keeps this computer awake while an agent works, and lets it sleep a minute after the last one stops. Click to change (kvali.keepAwake).';
+    this.awakeItem.command = { command: 'workbench.action.openSettings', title: 'Keep awake', arguments: ['kvali.keepAwake'] };
+  }
+
+  /** The coffee cup, shown while Kvali keeps the computer awake. */
+  setAwake(active: boolean, enabled: boolean): void {
+    if (active && enabled) this.awakeItem.show();
+    else this.awakeItem.hide();
   }
 
   update(snapshot: Snapshot, roots: readonly string[], enabled: boolean, showCost: boolean): void {
@@ -155,5 +166,6 @@ export class StatusBar {
   dispose(): void {
     this.item.dispose();
     this.limitItem.dispose();
+    this.awakeItem.dispose();
   }
 }

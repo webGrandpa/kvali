@@ -48,6 +48,7 @@ const SONNET_4 = p(3, 3.75, 6, 0.3, 15);
 
 /** Keys are `family-major[-minor]`, see `anthropicModelKey`. */
 export const ANTHROPIC_PRICES: Record<string, ModelPrice> = {
+  'fable-5-2': p(8, 10, 16, 0.2, 40),
   'fable-5-1': p(10, 12.5, 20, 0.25, 50),
   'mythos-5-1': p(10, 12.5, 20, 0.25, 50),
   'opus-5-5': { ...p(4, 5, 8, 0.2, 20), fastMultiplier: 2 },

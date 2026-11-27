@@ -90,6 +90,8 @@ test('Pricing applies cache tiers, long-prompt tiers, fast mode and custom globs
   const pricing = new Pricing({ 'gemini-3-*': { input: 2, output: 12, cacheRead: 0.2 } });
   const u = { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 };
   assert.equal(pricing.cost('claude-opus-5-5', u), 4);
+  assert.equal(pricing.cost('claude-fable-5-2', u), 8, 'Fable 5.2: $8 per million input tokens');
+  assert.equal(pricing.cost('claude-fable-5-2', { ...u, input: 0, cacheRead: 1_000_000 }), 0.2, 'and $0.20 per million cached');
   assert.equal(pricing.cost('claude-opus-5-5', { ...u, speed: 'fast' }), 8);
   assert.equal(pricing.cost('claude-haiku-5-5', { ...u, input: 50_000 }), 0.005);
   assert.equal(pricing.cost('claude-haiku-5-5', { ...u, input: 200_000 }), 0.1, 'long-prompt tier above 100k');

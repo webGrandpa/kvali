@@ -116,7 +116,7 @@ npx @kvali/cli --here   # only this project
 npx @kvali/cli --json   # one snapshot as JSON, for scripts
 ```
 
-`npm install -g @kvali/cli` installs the `kvali` command (`kvali setup`, `kvali phone`, `kvali watch`). From source: `pnpm install && pnpm build && node packages/cli/dist/kvali.mjs`.
+`npm install -g @kvali/cli` installs the `kvali` command (`kvali setup`, `kvali phone`, `kvali watch`; add `--keep-awake` to keep the computer awake while an agent works). From source: `pnpm install && pnpm build && node packages/cli/dist/kvali.mjs`.
 
 ## What "Turn on" does
 
@@ -166,6 +166,7 @@ curl -s --noproxy '*' -m 2 -o /dev/null -H 'Content-Type: application/json' --da
 | `kvali.notifications.system` | `true` | Also use macOS / Linux notifications when the editor is in the background |
 | `kvali.statusBar.enabled` | `true` | Status bar item for this workspace |
 | `kvali.autoPlan` | `true` | Remind Claude Code to keep a plan while a session has none |
+| `kvali.keepAwake` | `whenPluggedIn` | Keep the computer from idle sleep while an agent works: `whenPluggedIn`, `always` (on battery too) or `off`; it may sleep a minute after the last agent stops |
 | `kvali.cost.show` | `true` | Show API value (what the tokens would cost at API list prices) |
 | `kvali.pricing` | `{}` | Prices in USD per million tokens, e.g. `{ "gpt-5.5*": { "input": 1.25, "output": 10, "cacheRead": 0.125 } }` |
 | `kvali.agents.disabled` | `[]` | Agents Kvali should not read |

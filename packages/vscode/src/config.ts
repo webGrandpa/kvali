@@ -1,7 +1,7 @@
 import path from 'node:path';
 import * as vscode from 'vscode';
-import type { AgentId, ModelPrice } from '@kvali/core';
-import { DEFAULT_HOOK_PORT } from '@kvali/core';
+import type { AgentId, KeepAwakeMode, ModelPrice } from '@kvali/core';
+import { DEFAULT_HOOK_PORT, keepAwakeMode } from '@kvali/core';
 import type { Scope } from './messages.ts';
 
 export interface KvaliConfig {
@@ -15,6 +15,7 @@ export interface KvaliConfig {
   notifySystem: boolean;
   showCost: boolean;
   autoPlan: boolean;
+  keepAwake: KeepAwakeMode;
   pricing: Record<string, Partial<ModelPrice>>;
   disabled: AgentId[];
   brainDirs: string[];
@@ -44,6 +45,7 @@ export function readConfig(): KvaliConfig {
     notifySystem: c.get<boolean>('notifications.system', true),
     showCost: c.get<boolean>('cost.show', true),
     autoPlan: c.get<boolean>('autoPlan', true),
+    keepAwake: keepAwakeMode(c.get('keepAwake')),
     pricing: pricing && typeof pricing === 'object' && !Array.isArray(pricing) ? (pricing as Record<string, Partial<ModelPrice>>) : {},
     disabled: strings(c.get('agents.disabled')) as AgentId[],
     // Folders to read Antigravity's plans from: full paths only, never "/" itself.

@@ -19,7 +19,9 @@ import {
   DEFAULT_HOOK_PORT,
   Engine,
   HookHub,
+  KeepAwake,
   STATUS_LABEL,
+  agentsWorking,
   createDefaultAdapters,
   addGlobalPlanRule,
   addProgressProtocol,
@@ -74,13 +76,14 @@ import {
   DEFAULT_DONE_AFTER_SEC,
   PHONE_EVENTS,
   type AgentSession,
+  type KeepAwakeMode,
   type PhoneConfig,
   type PhoneEvent,
   type Snapshot,
   secureKvaliHome,
 } from '@kvali/core';
 
-const VERSION = '0.7.6';
+const VERSION = '0.7.7';
 
 interface Options {
   json: boolean;
@@ -103,6 +106,8 @@ interface Options {
   doneAfter: number | undefined;
   /** `kvali week --svg [file]`: also write the card ('' for the default name). */
   svg?: string;
+  /** `--keep-awake` (on mains power) or `--keep-awake=always`: the computer doesn't sleep while an agent works. */
+  keepAwake: KeepAwakeMode;
 }
 
 function parse(argv: string[]): { cmd: string[]; opts: Options } {
@@ -119,6 +124,7 @@ function parse(argv: string[]): { cmd: string[]; opts: Options } {
     steps: undefined,
     events: undefined,
     doneAfter: undefined,
+    keepAwake: 'off',
   };
   const cmd: string[] = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -196,6 +202,12 @@ function parse(argv: string[]): { cmd: string[]; opts: Options } {
         opts.doneAfter = Math.round(sec);
         break;
       }
+      case '--keep-awake':
+        opts.keepAwake = 'whenPluggedIn';
+        break;
+      case '--keep-awake=always':
+        opts.keepAwake = 'always';
+        break;
       case '--svg':
         opts.svg = argv[i + 1] !== undefined && !argv[i + 1]!.startsWith('-') ? argv[++i] : '';
         break;
@@ -244,6 +256,7 @@ Options
   --home <dir>                read agent data from another home directory
   --port <n>                  hook hub port (default ${DEFAULT_HOOK_PORT})
   --no-hub                    do not listen for hook events (and send no phone notifications)
+  --keep-awake                keep this computer awake while an agent works, on mains power (--keep-awake=always: on battery too)
   --no-color
   kvali phone options: --server <url> (self-hosted ntfy)  --token <token>  --private (no project or step names)
                               --events needs-you,done,steps,actions,error,stuck,limits (what to hear about)  --done-after <seconds> (shortest task worth a notification; 0: every task)  --no-steps`;
@@ -631,6 +644,16 @@ async function phone(sub: string | undefined, opts: Options, arg?: string): Prom
   );
 }
 
+/** `--keep-awake`: holds the computer awake while an agent works, checked on every snapshot and every 30 seconds. */
+function startKeepAwake(engine: Engine, opts: Options, say?: (line: string) => void): KeepAwake | undefined {
+  if (opts.keepAwake === 'off') return undefined;
+  const awake = new KeepAwake({ log: say });
+  const check = () => void awake.update(agentsWorking(engine.snapshot.sessions, Date.now()), opts.keepAwake);
+  engine.onSnapshot(check);
+  setInterval(check, 30_000).unref();
+  return awake;
+}
+
 async function main(): Promise<void> {
   const { cmd, opts } = parse(process.argv.slice(2));
   await secureKvaliHome(opts.home);
@@ -695,15 +718,17 @@ async function main(): Promise<void> {
   startPhone(engine, hub, opts.home, (line) => {
     phoneLine = `${new Date().toLocaleTimeString()} ${line}`;
   });
+  const awake = startKeepAwake(engine, opts);
   const out = process.stdout;
   out.write(`${ESC}?1049h${ESC}?25l`);
   const restore = () => {
     out.write(`${ESC}?25h${ESC}?1049l`);
+    awake?.dispose();
     hub?.dispose();
     engine.dispose();
   };
   const draw = (snap: Snapshot) =>
-    out.write(`${ESC}H${ESC}2J${render(snap, opts)}\n${paint(opts.color).gray(`\n${phoneLine ? `${phoneLine}\n` : ''}q to quit`)}`);
+    out.write(`${ESC}H${ESC}2J${render(snap, opts)}\n${paint(opts.color).gray(`\n${phoneLine ? `${phoneLine}\n` : ''}${awake?.active ? 'keeping this computer awake · ' : ''}q to quit`)}`);
   engine.onSnapshot(draw);
   engine.start();
   const clock = setInterval(() => draw(engine.snapshot), 1_000);
@@ -740,10 +765,12 @@ async function watch(opts: Options): Promise<void> {
   const say = (line: string) => console.log(`${new Date().toLocaleTimeString()} ${line}`);
   hub.start();
   startPhone(engine, hub, opts.home, say);
+  const awake = startKeepAwake(engine, opts, say);
   engine.start();
   const cfg = await readPhoneConfig(opts.home);
   say(cfg ? `watching agents; phone notifications go to ${channelNames(cfg)}` : 'watching agents; phone notifications are not set up (run `kvali phone`)');
   const stop = () => {
+    awake?.dispose();
     hub.dispose();
     engine.dispose();
     process.exit(0);

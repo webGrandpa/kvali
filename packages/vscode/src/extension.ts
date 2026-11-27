@@ -4,7 +4,9 @@ import * as vscode from 'vscode';
 import {
   Engine,
   HookHub,
+  KeepAwake,
   Pricing,
+  agentsWorking,
   addProgressProtocol,
   applySetup,
   claudeHookReply,
@@ -147,6 +149,10 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
 
   const view = new AgentsView(context.extensionUri, (m) => void onMessage(m));
   const statusBar = new StatusBar();
+  // While an agent works, the computer doesn't fall asleep under it (kvali.keepAwake).
+  const awake = new KeepAwake({ log: (m) => log.info(m) });
+  awake.onChange((active) => statusBar.setAwake(active, config.statusBar));
+  const keepAwake = () => void awake.update(agentsWorking(engine.snapshot.sessions, Date.now()), config.keepAwake);
   const notifier = new Notifier({
     config: () => config,
     // Notify for sessions in this workspace; the hook hub also covers sessions no open window claims.
@@ -181,6 +187,7 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
 
   engine.onSnapshot((snap) => {
     refreshStatusBar();
+    keepAwake();
     notifier.update(snap);
     void windows.checkFocus();
     const hadPhone = !!phone.config;
@@ -742,11 +749,14 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
         void vscode.window.showInformationMessage('Kvali: reload the window to use the new hook port.');
       }
       refreshStatusBar();
+      statusBar.setAwake(awake.active, config.statusBar);
+      keepAwake();
       pushState();
       void engine.tick();
     }),
 
     { dispose: () => engine.dispose() },
+    { dispose: () => awake.dispose() },
     { dispose: () => hub.dispose() },
     { dispose: () => windows.dispose() },
     { dispose: () => notifier.dispose() },
@@ -754,7 +764,10 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
   );
 
   // Time-based labels in the status bar ("done" fades after 30 minutes).
-  const clock = setInterval(refreshStatusBar, 30_000);
+  const clock = setInterval(() => {
+    refreshStatusBar();
+    keepAwake();
+  }, 30_000);
   context.subscriptions.push({ dispose: () => clearInterval(clock) });
 
   windows.start();

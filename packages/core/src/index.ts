@@ -3,6 +3,7 @@ export * from './format.ts';
 export * from './limits.ts';
 export * from './week.ts';
 export * from './pricing.ts';
+export * from './wake.ts';
 export type { Adapter, AdapterContext, Candidate } from './adapter.ts';
 export { JsonlSessionAdapter, staleness } from './adapter.ts';
 export { Engine, createDefaultAdapters, defaultLiveDir, mergeProgressFiles, sortSessions, weekSnapshot } from './engine.ts';

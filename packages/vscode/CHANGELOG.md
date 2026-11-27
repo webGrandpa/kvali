@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.7 — 2026-11-27
+
+- **The computer stays awake while an agent works.** A long run no longer stops halfway because the Mac or PC went to sleep while you were away. While any agent Kvali sees is working (Claude Code, Codex, Gemini CLI, Antigravity, Copilot, Cline, Roo Code, Kilo Code, OpenCode), Kvali keeps the computer from idle sleep, and lets it sleep again a minute after the last one stops. A coffee cup in the status bar shows when it does. It is on by default while the computer runs on mains power: set `kvali.keepAwake` to `always` to hold it on battery too, or `off`. The display still turns off, and closing a laptop's lid still puts it to sleep. A session that has gone quiet for ten minutes with nothing running doesn't count, so a stuck one can't keep the computer up. In the terminal: `kvali --keep-awake` or `kvali watch --keep-awake` (`--keep-awake=always` on battery too). It uses `caffeinate` on macOS, `systemd-inhibit` on Linux and the system's own power request on Windows, and each ends by itself if Kvali stops.
+- **Claude Fable 5.2 has its price.** Claude Code's default Fable model since 2.1.321 ($8 / $40 per million tokens, $0.20 cached) showed no cost on the cards.
+
 ## 0.7.6 — 2026-11-11
 
 - **/compact no longer starts a turn that never ends.** After a compaction Claude Code writes a summary of the conversation as a user message. Kvali took it for a new prompt and showed the session "Working · 0 steps", then "No output for 22m… it may be stuck", though Claude had finished and nobody had asked anything. The summary no longer counts as a prompt or as the session's title, and a turn whose context fills up mid-way goes on as one turn.
