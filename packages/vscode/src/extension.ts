@@ -7,6 +7,8 @@ import {
   KeepAwake,
   Pricing,
   agentsWorking,
+  fmtClock,
+  limitStopText,
   addProgressProtocol,
   applySetup,
   claudeHookReply,
@@ -64,7 +66,8 @@ import { AgentsView } from './panel.ts';
 import { PhoneSender } from './phone.ts';
 import { SharePanel } from './share.ts';
 import { StatusBar } from './statusbar.ts';
-import { goToAgent, jumpHere, type JumpDeps } from './jump.ts';
+import { SESSION_PANEL, goToAgent, jumpHere, type JumpDeps } from './jump.ts';
+import { CONTINUE_MODELS, CONTINUE_PROMPT, limitOfOneModel, modelFamily, resumeCommand } from './resume.ts';
 import { SAFE_ID, safeFile, safeFolder } from './paths.ts';
 import { WindowRegistry } from './windows.ts';
 
@@ -149,6 +152,8 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
 
   const view = new AgentsView(context.extensionUri, (m) => void onMessage(m));
   const statusBar = new StatusBar();
+  /** Sessions Kvali continues by itself once their limit resets: session key → when, and the timer. */
+  const scheduled = new Map<string, { at: number; timer: NodeJS.Timeout }>();
   // While an agent works, the computer doesn't fall asleep under it (kvali.keepAwake).
   const awake = new KeepAwake({ log: (m) => log.info(m) });
   awake.onChange((active) => statusBar.setAwake(active, config.statusBar));
@@ -178,6 +183,7 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
       home,
       phone: phone.view(),
       phoneCard,
+      scheduled: Object.fromEntries([...scheduled].map(([k, v]) => [k, v.at])),
     });
   }
 
@@ -454,6 +460,64 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
     }
   }
 
+  /** A minute after the limit resets: its clock and Claude Code's may differ by a little. */
+  const RESET_MARGIN_MS = 60_000;
+
+  /**
+   * Continue on a session a plan's limit stopped: now (with another model, when the limit is that
+   * model's alone), or by itself once the limit resets.
+   */
+  async function continueSession(s: AgentSession): Promise<void> {
+    const stop = s.limitStop;
+    const now = Date.now();
+    if (!stop || stop.resetsAt === undefined || stop.resetsAt <= now) return resume(s, { prompt: CONTINUE_PROMPT });
+    type Item = vscode.QuickPickItem & { run: () => Promise<void> | void };
+    const at = stop.resetsAt + RESET_MARGIN_MS;
+    const items: Item[] = [{ label: `$(clock) Continue at ${fmtClock(at)}`, description: `once the ${stop.limit} resets`, run: () => schedule(s, at) }];
+    const inPanel = opensInPanel(s);
+    if (limitOfOneModel(stop.limit) && !inPanel) {
+      const own = modelFamily(s.model) ?? stop.limit.split(' ')[0]!.toLowerCase();
+      for (const m of CONTINUE_MODELS.filter((x) => x.family !== own)) {
+        items.push({ label: `$(play) Continue now with ${m.label}`, description: `the ${stop.limit} doesn't apply to it`, run: () => resume(s, { prompt: CONTINUE_PROMPT, model: m.id }) });
+      }
+    }
+    items.push({
+      label: '$(play) Continue now',
+      description: inPanel ? "in Claude Code's panel, where you can pick another model" : 'if the limit has reset already',
+      run: () => resume(s, { prompt: CONTINUE_PROMPT }),
+    });
+    const pick = await vscode.window.showQuickPick(items, { title: `${s.title} · ${limitStopText(stop, now)}`, placeHolder: 'When should Claude continue?' });
+    if (pick) await pick.run();
+  }
+
+  function schedule(s: AgentSession, at: number): void {
+    cancelScheduled(s.key);
+    const timer = setTimeout(() => void fireScheduled(s.key), Math.max(0, at - Date.now()));
+    scheduled.set(s.key, { at, timer });
+    log.info(`Continue scheduled: ${s.agent} ${s.id} at ${new Date(at).toISOString()}`);
+    pushState();
+  }
+
+  function cancelScheduled(key: string): void {
+    const x = scheduled.get(key);
+    if (!x) return;
+    clearTimeout(x.timer);
+    scheduled.delete(key);
+    pushState();
+  }
+
+  async function fireScheduled(key: string): Promise<void> {
+    cancelScheduled(key);
+    const s = findSession(key);
+    // Claude Code continues a session that is still open by itself once the limit resets, and you may have too.
+    if (!s?.limitStop) {
+      log.info(`Continue at the reset: ${key} went on already`);
+      return;
+    }
+    log.info(`Continue at the reset: ${s.agent} ${s.id}`);
+    await resume(s, { prompt: CONTINUE_PROMPT });
+  }
+
   /** The file the session was read from, in an editor tab. */
   async function openSource(s: AgentSession | undefined): Promise<void> {
     const file = await safeFile(s?.sources[0]);
@@ -464,9 +528,35 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
     return (s.agent === 'claude-code' || s.agent === 'codex') && SAFE_ID.test(s.id) && s.status !== 'working' && s.status !== 'waiting';
   }
 
-  async function resume(s: AgentSession): Promise<void> {
+  async function hasCommand(id: string): Promise<boolean> {
+    return (await vscode.commands.getCommands(true)).includes(id);
+  }
+
+  /**
+   * Opens the session again where it ran. A session of Claude Code's editor panel opens in that
+   * panel (with `prompt` typed into its box, for you to send), never as a second copy in a
+   * terminal; any other opens in a new terminal, with `prompt` sent at once.
+   */
+  /**
+   * Whether Resume and Continue open this session in Claude Code's panel: one that ran there
+   * (kvali.continueIn "auto"), or any of this window's ("panel"). The panel lists the open
+   * folder's sessions, so one of another project opens in a terminal.
+   */
+  function opensInPanel(s: AgentSession): boolean {
+    if (s.agent !== 'claude-code' || config.continueIn === 'terminal' || !inWorkspace(s)) return false;
+    return config.continueIn === 'panel' || s.host === 'editor' || !!s.ranInEditor;
+  }
+
+  async function resume(s: AgentSession, opts: { prompt?: string; model?: string } = {}): Promise<void> {
     if (!SAFE_ID.test(s.id)) return;
-    const cmd = s.agent === 'claude-code' ? `claude --resume ${s.id}` : s.agent === 'codex' ? `codex resume ${s.id}` : undefined;
+    const panel = SESSION_PANEL['claude-code'];
+    if (opensInPanel(s) && !opts.model && panel && (await hasCommand(panel))) {
+      await vscode.commands.executeCommand(panel, s.id, opts.prompt);
+      log.info(`Resume in Claude Code's panel: ${s.id}${opts.prompt ? ' (with the message to continue)' : ''}`);
+      if (opts.prompt) void vscode.window.showInformationMessage("The message to continue is in Claude Code's box: press Enter to send it.");
+      return;
+    }
+    const cmd = resumeCommand(s.agent, s.id, opts);
     if (!cmd) return;
     // The agent finds the session by its folder: resume there, or not at all.
     const cwd = await safeFolder(s.cwd ?? s.projectPath);
@@ -573,6 +663,14 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
         if (s) await resume(s);
         return;
       }
+      case 'continue': {
+        const s = findSession(m.key);
+        if (s) await continueSession(s);
+        return;
+      }
+      case 'cancelContinue':
+        cancelScheduled(m.key);
+        return;
       case 'goto': {
         const s = findSession(m.key);
         if (s) await goTo(s);
@@ -757,6 +855,7 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
 
     { dispose: () => engine.dispose() },
     { dispose: () => awake.dispose() },
+    { dispose: () => { for (const x of scheduled.values()) clearTimeout(x.timer); } },
     { dispose: () => hub.dispose() },
     { dispose: () => windows.dispose() },
     { dispose: () => notifier.dispose() },
@@ -767,6 +866,8 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
   const clock = setInterval(() => {
     refreshStatusBar();
     keepAwake();
+    // A computer that slept holds timers back: catch up with any continue that is due.
+    for (const [key, x] of scheduled) if (Date.now() >= x.at + 5_000) void fireScheduled(key);
   }, 30_000);
   context.subscriptions.push({ dispose: () => clearInterval(clock) });
 

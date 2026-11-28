@@ -16,6 +16,8 @@ export interface KvaliConfig {
   showCost: boolean;
   autoPlan: boolean;
   keepAwake: KeepAwakeMode;
+  /** Where Resume and Continue open a Claude Code session. */
+  continueIn: 'auto' | 'panel' | 'terminal';
   pricing: Record<string, Partial<ModelPrice>>;
   disabled: AgentId[];
   brainDirs: string[];
@@ -46,6 +48,7 @@ export function readConfig(): KvaliConfig {
     showCost: c.get<boolean>('cost.show', true),
     autoPlan: c.get<boolean>('autoPlan', true),
     keepAwake: keepAwakeMode(c.get('keepAwake')),
+    continueIn: ((v) => (v === 'panel' || v === 'terminal' ? v : 'auto'))(c.get<string>('continueIn')),
     pricing: pricing && typeof pricing === 'object' && !Array.isArray(pricing) ? (pricing as Record<string, Partial<ModelPrice>>) : {},
     disabled: strings(c.get('agents.disabled')) as AgentId[],
     // Folders to read Antigravity's plans from: full paths only, never "/" itself.

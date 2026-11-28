@@ -20,6 +20,7 @@ Long agent runs are a black box. You either babysit the chat or keep asking for 
 - **What it is doing right now**: "Running `pnpm test` · 41s", "Editing `src/app.tsx`", the last few actions, and how long the current step is taking compared with the earlier ones ("4m of ~6m").
 - **Going in circles**: when the same action fails again and again with the same error, Kvali says so, with the tokens it has cost, before it burns through your budget.
 - **Go to agent**: one click from a card or a notification to the terminal, window or panel the agent runs in.
+- **Stopped at a limit?** The card says which one and when it resets ("Stopped at the 5-hour limit · resets at 19:00"), and **Continue** picks the work up again: at once after the reset, by itself at the reset, or now with another model when the limit is one model's own.
 - **Stuck or working?** Each working agent shows whether it is active, waiting for a long command, retrying after a connection/API error, or silent with nothing running. With the [Claude Code plugin](#claude-code-plugin) this is exact for Claude Code: thinking, writing, running a tool, waiting for you, no data from the API, or closed.
 - **Needs you**: permission prompts and questions surface in the status bar and as notifications, including OS notifications when the editor is in the background.
 - **On your phone**: each task's progress as one silent notification that every finished step updates, and an alert when an agent needs you, finishes, fails, goes quiet or goes in circles, or a plan limit is about to run out, through the free [ntfy](https://ntfy.sh) app (iPhone and Android), a Telegram bot or a Discord channel, for every agent. See [Phone notifications](#phone-notifications).
@@ -166,6 +167,7 @@ curl -s --noproxy '*' -m 2 -o /dev/null -H 'Content-Type: application/json' --da
 | `kvali.notifications.system` | `true` | Also use macOS / Linux notifications when the editor is in the background |
 | `kvali.statusBar.enabled` | `true` | Status bar item for this workspace |
 | `kvali.autoPlan` | `true` | Remind Claude Code to keep a plan while a session has none |
+| `kvali.continueIn` | `auto` | Where Resume and Continue open a Claude Code session: Claude Code's panel for sessions that ran there (`auto`), the panel for every session of the open folder (`panel`), or a terminal (`terminal`) |
 | `kvali.keepAwake` | `whenPluggedIn` | Keep the computer from idle sleep while an agent works: `whenPluggedIn`, `always` (on battery too) or `off`; it may sleep a minute after the last agent stops |
 | `kvali.cost.show` | `true` | Show API value (what the tokens would cost at API list prices) |
 | `kvali.pricing` | `{}` | Prices in USD per million tokens, e.g. `{ "gpt-5.5*": { "input": 1.25, "output": 10, "cacheRead": 0.125 } }` |

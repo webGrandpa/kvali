@@ -29,6 +29,8 @@ import { contentText, errorMessage, firstLine, stripInjectedTags, summarizeComma
 import { addTaskDone, addWork, dayKey, parseTime } from '../util/time.ts';
 import { LimitBook, claudeWindowLabel, type AgentLimits } from '../limits.ts';
 import { LoopWatch, loopKey } from '../util/loop-watch.ts';
+import { limitStopOf, type LimitStop } from '../util/limit-stop.ts';
+import { limitStopText } from '../format.ts';
 
 type Phase = 'working' | 'tool' | 'idle' | 'interrupted' | 'error';
 
@@ -53,6 +55,8 @@ interface ClaudeState {
   version?: string;
   /** How Claude Code was started: `cli`, `claude-vscode`, `sdk-ts`, … */
   entrypoint?: string;
+  /** Some record came from an editor extension's panel (Claude Code for VS Code, JetBrains). */
+  ranInEditor?: boolean;
   /** Current working directory (may change when the agent cds). */
   cwd?: string;
   model?: string;
@@ -88,6 +92,8 @@ interface ClaudeState {
   phase: Phase;
   phaseAt: number;
   errorText?: string;
+  /** The last turn ended on a plan's usage limit. */
+  limitStop?: LimitStop;
   turns: number;
   /** Tool calls in the current (or last) turn, and when it began. */
   turnSteps: number;
@@ -416,7 +422,10 @@ export class ClaudeCodeAdapter implements Adapter {
       if (st.lastRecordAt === undefined || ts > st.lastRecordAt) st.lastRecordAt = ts;
     }
     if (typeof o.version === 'string') st.version = o.version;
-    if (typeof o.entrypoint === 'string') st.entrypoint = o.entrypoint;
+    if (typeof o.entrypoint === 'string') {
+      st.entrypoint = o.entrypoint;
+      if (o.entrypoint !== 'cli' && /vscode|jetbrains|ide/.test(o.entrypoint)) st.ranInEditor = true;
+    }
     if (typeof o.cwd === 'string' && o.cwd) {
       st.cwd = o.cwd;
       st.launchCwd ??= o.cwd;
@@ -536,9 +545,22 @@ export class ClaudeCodeAdapter implements Adapter {
     if (typeof m.model === 'string' && m.model !== '<synthetic>') st.model = m.model;
     st.lastModelAt = ts;
     this.countUsage(st, o, ts, ctx, true);
-    if (m.model !== '<synthetic>') st.trouble = undefined;
+    if (m.model !== '<synthetic>') {
+      st.trouble = undefined;
+      st.limitStop = undefined;
+    }
 
     if (o.isApiErrorMessage || (o.error && m.model === '<synthetic>')) {
+      // A plan's usage limit is no error: the session waits for it to reset.
+      const limit = limitStopOf(o, contentText(m.content), ts);
+      if (limit) {
+        st.limitStop = limit;
+        st.phase = 'idle';
+        st.phaseAt = ts;
+        st.open.clear();
+        this.endTurn(st, ts, undefined);
+        return;
+      }
       st.phase = 'error';
       st.phaseAt = ts;
       st.errorText = firstLine(contentText(m.content) || 'API error', 120);
@@ -707,6 +729,7 @@ export class ClaudeCodeAdapter implements Adapter {
       st.turnOpen = true;
       st.turnEndedBy = undefined;
       st.loops.reset();
+      st.limitStop = undefined;
     }
     if (!isCommand) {
       st.phase = 'working';
@@ -956,6 +979,11 @@ export class ClaudeCodeAdapter implements Adapter {
       else if (beat.phase === 'error') detail = st.errorText ?? 'Stopped with an error';
     }
 
+    if (st.limitStop && status !== 'working' && status !== 'waiting' && status !== 'stale') {
+      status = 'idle';
+      detail = limitStopText(st.limitStop, now);
+    }
+
     if (status === 'working') {
       const stale = staleness(lastSignal, ctx);
       if (stale) {
@@ -987,8 +1015,10 @@ export class ClaudeCodeAdapter implements Adapter {
       model: st.model,
       agentVersion: st.version,
       host: st.entrypoint === undefined ? undefined : st.entrypoint === 'cli' ? 'terminal' : /vscode|jetbrains|ide/.test(st.entrypoint) ? 'editor' : 'app',
+      ranInEditor: st.ranInEditor || undefined,
       status,
       statusDetail: detail,
+      limitStop: st.limitStop && status === 'idle' ? { ...st.limitStop } : undefined,
       startedAt: st.startedAt,
       updatedAt: Math.max(st.updatedAt, live?.at ?? 0),
       tasks,

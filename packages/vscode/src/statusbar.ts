@@ -7,6 +7,7 @@ import {
   fmtEta,
   fmtTokens,
   fmtUsd,
+  limitStopText,
   pathWithin,
   planEta,
   pressingWindow,
@@ -99,8 +100,12 @@ export class StatusBar {
       const recent = ws.find((s) => now - s.updatedAt < RECENT_MS);
       if (recent) {
         const p = progressOf(recent.tasks);
-        const icon = recent.status === 'done' ? '$(check)' : recent.status === 'error' ? '$(error)' : '$(circle-large-outline)';
-        const what = recent.status === 'done' && p.total ? `Done ${p.done}/${p.total}` : `${recent.agentLabel} ${STATUS_LABEL[recent.status].toLowerCase()}`;
+        const icon = recent.limitStop ? '$(watch)' : recent.status === 'done' ? '$(check)' : recent.status === 'error' ? '$(error)' : '$(circle-large-outline)';
+        const what = recent.limitStop
+          ? `${recent.agentLabel}: ${limitStopText(recent.limitStop, now).replace(/^Stopped at the /, '')}`
+          : recent.status === 'done' && p.total
+            ? `Done ${p.done}/${p.total}`
+            : `${recent.agentLabel} ${STATUS_LABEL[recent.status].toLowerCase()}`;
         this.item.text = `${icon} ${what}`;
       } else {
         this.item.text = '$(pulse)';

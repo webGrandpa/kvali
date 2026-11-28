@@ -53,6 +53,8 @@ export interface ViewState {
   home: string;
   /** Phone notifications, when set up. */
   phone?: PhoneView;
+  /** Sessions Kvali continues by itself once their limit resets: session key → when. */
+  scheduled?: Record<string, number>;
   /** Show the phone card (after setup, or when asked). */
   phoneCard: boolean;
 }
@@ -62,6 +64,8 @@ export type FromWebview =
   | { type: 'setScope'; scope: Scope }
   | { type: 'open'; key: string }
   | { type: 'resume'; key: string }
+  | { type: 'continue'; key: string }
+  | { type: 'cancelContinue'; key: string }
   | { type: 'goto'; key: string }
   | { type: 'runSetup' }
   | { type: 'dismissSetup' }

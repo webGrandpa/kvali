@@ -120,6 +120,8 @@ export interface AgentSession {
    * to take you to the agent.
    */
   host?: AgentHost;
+  /** The session ran in an editor extension's panel at some point (Claude Code for VS Code), even if a terminal took it up since: it can open there again. */
+  ranInEditor?: boolean;
   /** The agent's process, when its files name it. */
   pid?: number;
   status: SessionStatus;
@@ -144,6 +146,11 @@ export interface AgentSession {
   loop?: { label: string; detail?: string; count: number; sameError: boolean; since: number; tokens?: number };
   /** Set while the agent reports an API or connection problem, e.g. while retrying. */
   trouble?: { message: string; at: number; attempt?: number; maxAttempts?: number };
+  /**
+   * The last turn ended on a plan's usage limit ("5-hour limit", "weekly limit", "Fable limit"):
+   * the session waits for it to reset. Cleared once the agent works again.
+   */
+  limitStop?: { at: number; limit: string; resetsAt?: number };
   /**
    * Exact liveness reported from inside the agent by Kvali's Claude Code plugin: what the
    * model's stream and tools are doing right now. `gone` means the agent was working and

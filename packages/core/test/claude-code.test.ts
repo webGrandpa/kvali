@@ -659,3 +659,109 @@ test('Claude Code: a compaction is no prompt, after /compact or in the middle of
   assert.equal(s.status, 'working');
   assert.equal(s.turn?.steps, 2, 'one turn, both of its steps');
 });
+
+test('Claude Code: a turn stopped by a plan limit says when it resets, and clears when Claude works again', async () => {
+  const home = tmpHome();
+  // 18:20 in Tbilisi (UTC+4): the 5-hour limit resets at 19:00 there.
+  const clock = new Clock('2026-11-27T14:20:00.000Z');
+  const file = path.join(home, '.claude', 'projects', '-work-shop', `${SID}.jsonl`);
+  const limitText = "You've hit your 5-hour limit · resets 7pm (Asia/Tbilisi)";
+  writeJsonl(file, [
+    { ...base(clock, 0), type: 'user', origin: { kind: 'human' }, message: { role: 'user', content: 'Adapt the site for phones' } },
+    ...assistant(clock, 1_000, 'a', [{ type: 'tool_use', id: 'tu_1', name: 'Bash', input: { command: 'pnpm test', description: 'Run the tests' } }], 'tool_use'),
+    toolResult(clock, 2_000, 'tu_1', 'ok'),
+    // What Claude Code writes in the model's place: its own words, no details beside them.
+    {
+      ...base(clock, 3_000),
+      type: 'assistant',
+      isApiErrorMessage: true,
+      error: 'rate_limit',
+      message: { id: 'msg_lim', role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: limitText }], stop_reason: 'stop_sequence', usage: { input_tokens: 0, output_tokens: 0 } },
+    },
+  ]);
+  clock.advance(10 * 60_000);
+  const engine = engineFor(new ClaudeCodeAdapter(), home, clock);
+  let s = await only(engine);
+  const resetsAt = Date.parse('2026-11-27T15:00:00.000Z');
+  assert.equal(s.status, 'idle', 'a limit is no error');
+  assert.deepEqual(s.limitStop && { limit: s.limitStop.limit, resetsAt: s.limitStop.resetsAt }, { limit: '5-hour limit', resetsAt });
+  assert.match(s.statusDetail ?? '', /^Stopped at the 5-hour limit · resets at /);
+
+  // After the reset the card says so, and still offers to continue.
+  clock.advance(60 * 60_000);
+  s = await only(engine);
+  assert.match(s.statusDetail ?? '', /^Stopped at the 5-hour limit · it reset at /);
+  assert.ok(s.limitStop);
+
+  // The person writes again (or Claude Code continues by itself): the stop is over.
+  appendJsonl(file, [{ ...base(clock, 0), type: 'user', origin: { kind: 'human' }, message: { role: 'user', content: 'Continue where you left off.' } }]);
+  clock.advance(1_000);
+  s = await only(engine);
+  assert.equal(s.status, 'working');
+  assert.equal(s.limitStop, undefined);
+  assert.equal(s.statusDetail, undefined);
+});
+
+test('Claude Code: the limit details beside the message win over its words; other API errors stay errors', async () => {
+  const home = tmpHome();
+  const clock = new Clock('2026-11-27T10:00:00.000Z');
+  const file = path.join(home, '.claude', 'projects', '-work-shop', `${SID}.jsonl`);
+  writeJsonl(file, [
+    { ...base(clock, 0), type: 'user', origin: { kind: 'human' }, message: { role: 'user', content: 'Plan the release' } },
+    {
+      ...base(clock, 1_000),
+      type: 'assistant',
+      isApiErrorMessage: true,
+      error: 'rate_limit',
+      apiError: 'usage_limit_reached',
+      apiErrorParams: { rate_limit_info: { status: 'rejected', rateLimitType: 'seven_day_overage_included', resetsAt: 1_796_000_000 } },
+      message: { id: 'msg_f', role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: "You've reached your Fable limit." }], usage: { input_tokens: 0, output_tokens: 0 } },
+    },
+  ]);
+  clock.advance(1_000);
+  const engine = engineFor(new ClaudeCodeAdapter(), home, clock);
+  let s = await only(engine);
+  assert.deepEqual(s.limitStop && { limit: s.limitStop.limit, resetsAt: s.limitStop.resetsAt }, { limit: 'Fable limit', resetsAt: 1_796_000_000_000 });
+
+  // The model answers again (a model with its own limit): the stop is over, even with no new prompt.
+  appendJsonl(file, assistant(clock, 0, 'b', [{ type: 'text', text: 'Back at it.' }], 'end_turn'));
+  clock.advance(1_000);
+  s = await only(engine);
+  assert.equal(s.limitStop, undefined);
+
+  // A server error is still an error.
+  appendJsonl(file, [
+    {
+      ...base(clock, 0),
+      type: 'assistant',
+      isApiErrorMessage: true,
+      message: { id: 'msg_e', role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'API Error: 500 Internal server error' }], usage: { input_tokens: 0, output_tokens: 0 } },
+    },
+  ]);
+  clock.advance(1_000);
+  s = await only(engine);
+  assert.equal(s.status, 'error');
+  assert.equal(s.limitStop, undefined);
+});
+
+test('Claude Code: a session of the editor panel that a terminal took up since still opens in the panel', async () => {
+  const home = tmpHome();
+  const clock = new Clock('2026-11-27T16:00:00.000Z');
+  const file = path.join(home, '.claude', 'projects', '-work-shop', `${SID}.jsonl`);
+  writeJsonl(file, [
+    { ...base(clock, 0), entrypoint: 'claude-vscode', type: 'user', origin: { kind: 'human' }, message: { role: 'user', content: 'Adapt the site for phones' } },
+    ...assistant(clock, 1_000, 'a', [{ type: 'text', text: 'Done.' }], 'end_turn').map((r) => ({ ...r, entrypoint: 'claude-vscode' })),
+  ]);
+  clock.advance(1_000);
+  const engine = engineFor(new ClaudeCodeAdapter(), home, clock);
+  let s = await only(engine);
+  assert.equal(s.host, 'editor');
+  assert.equal(s.ranInEditor, true);
+
+  // `claude --resume` in a terminal writes on in the same file.
+  appendJsonl(file, [{ ...base(clock, 0), entrypoint: 'cli', type: 'system', subtype: 'informational', content: 'Resumed', level: 'info' }]);
+  clock.advance(1_000);
+  s = await only(engine);
+  assert.equal(s.host, 'terminal', 'Go to agent looks for the terminal');
+  assert.equal(s.ranInEditor, true, 'Resume and Continue may still open it in the panel');
+});

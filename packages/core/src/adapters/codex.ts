@@ -11,6 +11,10 @@
  * - Status: `task_started` → working, `task_complete` → idle, `turn_aborted` → interrupted.
  *
  * Compressed rollouts (`.jsonl.zst`) are archives older than 7 days and are skipped.
+ *
+ * A rollout stays in the folder of the day its session began: a session resumed days later
+ * (`codex resume`, the TUI's thread list) writes on in an older folder. Those folders are looked
+ * through once a minute for files written within the active window.
  */
 import path from 'node:path';
 import type { AdapterContext, Candidate } from '../adapter.ts';
@@ -123,9 +127,16 @@ function describeCodexCall(name: string, args: Record<string, any>, at: number):
   return { kind: 'tool', label: name, startedAt: at };
 }
 
+/** How far back older day folders are looked through for resumed sessions, and how often. */
+const RESUMED_DAYS = 90;
+const RESUMED_SCAN_MS = 60_000;
+
 export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
   /** The account's plan windows, from every session's readings. */
   private readonly limitBook = new LimitBook();
+  /** Rollouts in older day folders that were written lately: sessions resumed since they began. */
+  private resumed: string[] = [];
+  private resumedAt = -Infinity;
 
   limits(ctx: AdapterContext): AgentLimits | undefined {
     const windows = this.limitBook.windows(ctx.now());
@@ -148,19 +159,51 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
       dirs.add(path.join(root, String(d.getUTCFullYear()), pad(d.getUTCMonth() + 1), pad(d.getUTCDate())));
     }
     const out: Candidate[] = [];
+    const seen = new Set<string>();
     for (const dir of dirs) {
       for (const f of await listDir(dir)) {
         if (!f.isFile() || !f.name.startsWith('rollout-') || !f.name.endsWith('.jsonl')) continue;
         const file = path.join(dir, f.name);
         const st = await statSafe(file);
-        if (st) out.push({ path: file, mtimeMs: st.mtimeMs });
+        if (st) {
+          out.push({ path: file, mtimeMs: st.mtimeMs });
+          seen.add(file);
+        }
       }
+    }
+    // Sessions resumed days after they began write on in their first day's folder.
+    if (now - this.resumedAt >= RESUMED_SCAN_MS) {
+      this.resumedAt = now;
+      const found: string[] = [];
+      for (let i = days + 1; i <= RESUMED_DAYS; i += 1) {
+        const d = new Date(now - i * 86_400_000);
+        const pad = (n: number) => String(n).padStart(2, '0');
+        for (const dir of new Set([
+          path.join(root, String(d.getFullYear()), pad(d.getMonth() + 1), pad(d.getDate())),
+          path.join(root, String(d.getUTCFullYear()), pad(d.getUTCMonth() + 1), pad(d.getUTCDate())),
+        ])) {
+          if (dirs.has(dir)) continue;
+          for (const f of await listDir(dir)) {
+            if (!f.isFile() || !f.name.startsWith('rollout-') || !f.name.endsWith('.jsonl')) continue;
+            const file = path.join(dir, f.name);
+            const st = await statSafe(file);
+            if (st && now - st.mtimeMs < ctx.activeWindowMs) found.push(file);
+          }
+        }
+      }
+      this.resumed = found;
+    }
+    for (const file of this.resumed) {
+      if (seen.has(file)) continue;
+      const st = await statSafe(file);
+      if (st) out.push({ path: file, mtimeMs: st.mtimeMs });
     }
     return out;
   }
 
   protected createState(file: string): CodexState {
-    const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i.exec(file);
+    // "rollout-<time>-<thread id>.jsonl", or "…-<thread id>_<rollout id>.jsonl" for a reverted thread: the thread's id resumes it.
+    const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?\.jsonl$/i.exec(file);
     const daily: Record<string, DailyUsage> = {};
     return {
       file,

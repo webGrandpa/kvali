@@ -404,6 +404,12 @@ time {
 .d-stale {
   color: var(--muted);
 }
+.d-limit {
+  color: var(--vscode-editorWarning-foreground, var(--c-wait));
+}
+.link.strong {
+  font-weight: 600;
+}
 
 .progress {
   display: flex;

@@ -64,6 +64,20 @@ export function fmtClock(ms: number): string {
   return new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
+/** "Stopped at the 5-hour limit · resets at 19:00", then "· it reset at 19:00" once it has. */
+export function limitStopText(stop: { limit: string; resetsAt?: number }, now: number): string {
+  const what = `Stopped at the ${stop.limit}`;
+  if (stop.resetsAt === undefined) return what;
+  const when = fmtWhen(stop.resetsAt, now);
+  return stop.resetsAt > now ? `${what} · resets at ${when}` : `${what} · it reset at ${when}`;
+}
+
+/** A time: "19:00" within the day around now, "Tue 1 Dec 10:00" further away. */
+export function fmtWhen(ms: number, now: number): string {
+  if (Math.abs(ms - now) < 20 * 3_600_000) return fmtClock(ms);
+  return `${new Date(ms).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })} ${fmtClock(ms)}`;
+}
+
 /** A forecast, to the minute: "~30m", "~1h 05m". */
 export function fmtAbout(ms: number): string {
   const m = Math.max(1, Math.round(ms / 60_000));

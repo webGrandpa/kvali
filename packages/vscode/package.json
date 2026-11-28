@@ -2,7 +2,7 @@
   "name": "kvali",
   "displayName": "Kvali — AI Agent Progress Tracker",
   "description": "One progress bar for all your AI coding agents: plan progress, the current step, usage and alerts on your phone, grouped by project. Local and read-only.",
-  "version": "0.7.7",
+  "version": "0.7.8",
   "publisher": "webgrandpa",
   "author": {
     "name": "Giorgi Khiladze",
@@ -236,6 +236,22 @@
           "scope": "application",
           "default": true,
           "description": "With the Claude Code hooks installed, ask Claude for a task list whenever a session has no unfinished plan (about 60 tokens per prompt, only while there is no plan). With Kvali's plugin it also keeps Claude Code's task tools in its tool list, so they are never hidden behind ToolSearch."
+        },
+        "kvali.continueIn": {
+          "type": "string",
+          "scope": "application",
+          "enum": [
+            "auto",
+            "panel",
+            "terminal"
+          ],
+          "enumDescriptions": [
+            "Claude Code's panel for a session that ran there, even if a terminal took it up since; a terminal for the others.",
+            "Claude Code's panel, for every session of the open folder.",
+            "A new terminal."
+          ],
+          "default": "auto",
+          "markdownDescription": "Where **Resume** and **Continue** open a Claude Code session. In Claude Code's panel Continue types the message into its box, and you press Enter; in a terminal it is sent at once."
         },
         "kvali.keepAwake": {
           "type": "string",

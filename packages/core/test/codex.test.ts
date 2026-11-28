@@ -99,3 +99,25 @@ test('Codex: subagent threads are hidden', async () => {
   const snap = await engineFor(new CodexAdapter(), home, clock).tick();
   assert.equal(snap.sessions.length, 0);
 });
+
+test('Codex: a session resumed days after it began is found in its first day\'s folder', async () => {
+  const home = tmpHome();
+  const clock = new Clock('2026-11-28T08:00:00.000Z');
+  const began = new Date(clock.t - 12 * 86_400_000);
+  const dir = path.join(home, '.codex', 'sessions', String(began.getFullYear()), String(began.getMonth() + 1).padStart(2, '0'), String(began.getDate()).padStart(2, '0'));
+  // A reverted thread's rollout: "<thread id>_<rollout id>". The thread's id is the one that resumes it.
+  const ROLLOUT = '019a2b3c-4d5e-7f60-8a9b-ffffffffffff';
+  const file = path.join(dir, `rollout-2026-11-16T08-00-00-${ID}_${ROLLOUT}.jsonl`);
+  const line = (offset: number, type: string, payload: unknown) => ({ timestamp: clock.iso(offset), type, payload });
+  writeJsonl(file, [
+    { timestamp: began.toISOString(), type: 'session_meta', payload: { id: ID, timestamp: began.toISOString(), cwd: '/work/api', originator: 'codex_cli_rs', cli_version: '0.172.0' } },
+    line(0, 'turn_context', { cwd: '/work/api', model: 'gpt-6.2-sol' }),
+    line(1, 'event_msg', { type: 'task_started' }),
+    line(2, 'event_msg', { type: 'user_message', message: 'Pick the migration up again' }),
+  ]);
+  clock.advance(5_000);
+  const engine = engineFor(new CodexAdapter(), home, clock);
+  const s = await only(engine);
+  assert.equal(s.id, ID);
+  assert.equal(s.status, 'working');
+});

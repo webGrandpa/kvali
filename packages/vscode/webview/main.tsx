@@ -10,6 +10,7 @@ import {
   fmtEta,
   fmtTokens,
   fmtUsd,
+  fmtWhen,
   groupByProject,
   pathWithin,
   planEta,
@@ -282,6 +283,7 @@ function Card({
   onToggle,
   showCost,
   autoPlans,
+  continueAt,
 }: {
   s: AgentSession;
   now: number;
@@ -289,6 +291,8 @@ function Card({
   onToggle: () => void;
   showCost: boolean;
   autoPlans: boolean;
+  /** Kvali continues this session at this time (after its limit resets). */
+  continueAt?: number;
 }) {
   const p = progressOf(s.tasks);
   const step = currentTask(s.tasks);
@@ -299,7 +303,9 @@ function Card({
   const working = s.status === 'working';
   // Stale cards say it in the liveness line instead ("No output for 45m and nothing is running").
   const showDetail = !!s.statusDetail && !working && s.status !== 'stale';
-  const canResume = (s.agent === 'claude-code' || s.agent === 'codex') && !working && s.status !== 'waiting';
+  // Stopped by a plan's limit: Continue picks the work up again, now or once the limit resets.
+  const limited = s.agent === 'claude-code' && !!s.limitStop && !working;
+  const canResume = (s.agent === 'claude-code' || s.agent === 'codex') && !working && s.status !== 'waiting' && !limited;
   // Kvali can take you to agents that run in a terminal or an editor panel.
   const canGoTo = s.agent !== 'progress-file' && s.agent !== 'antigravity' && s.host !== 'app';
   const transcript = s.sources[0] && !/\.db$/i.test(s.sources[0]) ? s.sources[0] : undefined;
@@ -322,7 +328,15 @@ function Card({
         {s.title}
       </h3>
 
-      {showDetail && <div class={`detail d-${s.status}`}>{s.statusDetail}</div>}
+      {showDetail && <div class={`detail d-${s.status}${limited ? ' d-limit' : ''}`}>{s.statusDetail}</div>}
+      {limited && continueAt !== undefined && (
+        <div class="detail d-limit">
+          Kvali continues it at {fmtWhen(continueAt, now)}{' '}
+          <button class="link" onClick={() => post({ type: 'cancelContinue', key: s.key })}>
+            Cancel
+          </button>
+        </div>
+      )}
 
       {p.total > 0 ? (
         <ProgressBar p={p} moving={working} eta={working ? planEta(s, now) : undefined} typicalMs={s.current?.typicalMs} />
@@ -368,8 +382,13 @@ function Card({
           </button>
         )}
         <span class="spacer" />
+        {limited && continueAt === undefined && (
+          <button class="link strong" title="Continue: Claude picks up where it stopped, now or once the limit resets" onClick={() => post({ type: 'continue', key: s.key })}>
+            Continue
+          </button>
+        )}
         {canResume && (
-          <button class="link" title="Continue this session in a new terminal" onClick={() => post({ type: 'resume', key: s.key })}>
+          <button class="link" title="Open this session again, where it ran: Claude Code's panel or a terminal" onClick={() => post({ type: 'resume', key: s.key })}>
             Resume
           </button>
         )}
@@ -397,6 +416,7 @@ function Group({
   setUi,
   showCost,
   autoPlans,
+  scheduled,
 }: {
   g: ProjectGroup;
   now: number;
@@ -404,6 +424,7 @@ function Group({
   setUi: (u: UiState) => void;
   showCost: boolean;
   autoPlans: boolean;
+  scheduled: Record<string, number>;
 }) {
   const id = g.path ?? '';
   const open = !ui.collapsed.includes(id);
@@ -434,6 +455,7 @@ function Group({
             now={now}
             showCost={showCost}
             autoPlans={autoPlans}
+            continueAt={scheduled[s.key]}
             expanded={ui.expanded.includes(s.key)}
             onToggle={() =>
               setUi({ ...ui, expanded: ui.expanded.includes(s.key) ? ui.expanded.filter((k) => k !== s.key) : [...ui.expanded, s.key] })
@@ -783,7 +805,7 @@ function App() {
       <Counts sessions={sessions} />
       <Limits limits={st.snapshot.limits} now={now} />
 
-      {groups.length === 0 ? <Empty hours={st.activeWindowHours} scope={st.scope} /> : groups.map((g) => <Group key={g.path ?? ''} g={g} now={now} ui={ui} setUi={setUi} showCost={st.showCost} autoPlans={autoPlans} />)}
+      {groups.length === 0 ? <Empty hours={st.activeWindowHours} scope={st.scope} /> : groups.map((g) => <Group key={g.path ?? ''} g={g} now={now} ui={ui} setUi={setUi} showCost={st.showCost} autoPlans={autoPlans} scheduled={st.scheduled ?? {}} />)}
 
       {needsRepair && (
         <aside class="tip">
