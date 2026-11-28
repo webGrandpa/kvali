@@ -83,7 +83,7 @@ import {
   secureKvaliHome,
 } from '@kvali/core';
 
-const VERSION = '0.7.8';
+const VERSION = '0.7.9';
 
 interface Options {
   json: boolean;

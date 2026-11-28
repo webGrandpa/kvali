@@ -67,7 +67,7 @@ import { PhoneSender } from './phone.ts';
 import { SharePanel } from './share.ts';
 import { StatusBar } from './statusbar.ts';
 import { SESSION_PANEL, goToAgent, jumpHere, type JumpDeps } from './jump.ts';
-import { CONTINUE_MODELS, CONTINUE_PROMPT, limitOfOneModel, modelFamily, resumeCommand } from './resume.ts';
+import { CONTINUE_MODELS, CONTINUE_PROMPT, limitOfOneModel, modelFamily, onPath, resumeCommand } from './resume.ts';
 import { SAFE_ID, safeFile, safeFolder } from './paths.ts';
 import { WindowRegistry } from './windows.ts';
 
@@ -558,6 +558,15 @@ export function activate(context: vscode.ExtensionContext): KvaliApi {
     }
     const cmd = resumeCommand(s.agent, s.id, opts);
     if (!cmd) return;
+    if (s.agent === 'codex' && !onPath('codex')) {
+      const where = s.host === 'app' ? 'Continue it in the Codex app' : s.host === 'editor' ? "Continue it in Codex's panel" : 'Continue it where it ran';
+      const choice = await vscode.window.showWarningMessage(
+        `Kvali cannot resume this Codex session in a terminal: the codex command is not installed here. ${where}, or install the Codex CLI: npm install -g @openai/codex`,
+        'Resume anyway',
+      );
+      log.info(`Resume: no codex on PATH for ${s.id}${choice ? ', resumed anyway' : ''}`);
+      if (choice !== 'Resume anyway') return;
+    }
     // The agent finds the session by its folder: resume there, or not at all.
     const cwd = await safeFolder(s.cwd ?? s.projectPath);
     if (!cwd) {

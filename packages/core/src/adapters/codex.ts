@@ -12,6 +12,11 @@
  *
  * Compressed rollouts (`.jsonl.zst`) are archives older than 7 days and are skipped.
  *
+ * Codex Desktop (originator "Codex Desktop") writes the same files. Its own helper threads, such
+ * as the guardian that checks commands under "approve for me", are marked
+ * `session_meta.source: { "subagent": … }` and are not sessions of their own. It writes no
+ * `user_message` events: the title comes from the person's message among the `response_item`s.
+ *
  * A rollout stays in the folder of the day its session began: a session resumed days later
  * (`codex resume`, the TUI's thread list) writes on in an older folder. Those folders are looked
  * through once a minute for files written within the active window.
@@ -38,6 +43,8 @@ interface CodexState {
   /** Who started it: `codex_cli_rs` (the TUI), `codex_vscode`, `codex_exec`, … */
   originator?: string;
   title?: string;
+  /** The person's first message among the transcript's items, for Codex Desktop, which writes no `user_message` events. */
+  promptTitle?: string;
   startedAt?: number;
   updatedAt: number;
   tokens?: TokenUsage;
@@ -49,6 +56,8 @@ interface CodexState {
   rateLimits?: RateLimitWindow[];
   tasks: TaskItem[];
   open: Map<string, Activity>;
+  /** What tells a freeform tool's call apart from the next, for its loop: its input. */
+  callKeys: Map<string, string>;
   activity?: Activity;
   phase: 'working' | 'idle' | 'interrupted' | 'error';
   phaseAt: number;
@@ -113,8 +122,11 @@ function parseArgs(raw: unknown): Record<string, any> {
   }
 }
 
+/** Codex's tools that run a command: `shell` (argv), `shell_command` (one line, PowerShell on Windows), `exec_command`, … */
+const SHELL_TOOLS = /^(?:shell|shell_command|exec_command|exec|unified_exec|container\.exec|local_shell)$/;
+
 function describeCodexCall(name: string, args: Record<string, any>, at: number): Activity {
-  if (name === 'shell' || name === 'exec_command' || name === 'container.exec' || name === 'local_shell') {
+  if (SHELL_TOOLS.test(name)) {
     return { kind: 'command', label: 'Shell', detail: summarizeCommand(args.command ?? args.cmd), startedAt: at };
   }
   if (name === 'apply_patch') return { kind: 'tool', label: 'Editing files', startedAt: at };
@@ -215,6 +227,7 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
       daily,
       tasks: [],
       open: new Map(),
+      callKeys: new Map(),
       phase: 'idle',
       phaseAt: 0,
       turns: 0,
@@ -250,6 +263,8 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
         if (typeof p.originator === 'string') st.originator = p.originator;
         else if (typeof p.source === 'string') st.originator = p.source;
         if (p.parent_thread_id || p.agent_role || p.agent_nickname) st.isSubagent = true;
+        // Codex Desktop's guardian ({ "subagent": { "other": "guardian" } }), reviews, spawned agents.
+        if (p.source && typeof p.source === 'object' && 'subagent' in p.source) st.isSubagent = true;
         const started = parseTime(p.timestamp);
         if (started) st.startedAt = Math.min(st.startedAt ?? started, started);
         return;
@@ -285,11 +300,13 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
         st.phase = 'idle';
         st.phaseAt = ts;
         st.open.clear();
+        st.callKeys.clear();
         return;
       case 'turn_aborted':
         st.phase = 'interrupted';
         st.phaseAt = ts;
         st.open.clear();
+        st.callKeys.clear();
         st.loops.reset();
         return;
       case 'error':
@@ -299,7 +316,8 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
         return;
       case 'user_message':
         if (typeof p.message === 'string' && p.message.trim()) {
-          st.title ??= firstLine(p.message, 100);
+          const said = codexPrompt(p.message);
+          if (said) st.title ??= firstLine(said, 100);
           st.loops.reset();
           if (st.phase !== 'working') {
             st.phase = 'working';
@@ -406,10 +424,22 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
         return;
       }
       case 'custom_tool_call': {
-        const act = describeCodexCall(String(p.name ?? 'tool'), {}, ts);
-        if (typeof p.call_id === 'string') st.open.set(p.call_id, act);
+        // A freeform tool's input is plain text: for a shell, the command (Codex Desktop runs its commands this way).
+        const name = String(p.name ?? 'tool');
+        const input = typeof p.input === 'string' ? p.input : undefined;
+        const act = describeCodexCall(name, input !== undefined ? { command: input } : {}, ts);
+        if (typeof p.call_id === 'string') {
+          st.open.set(p.call_id, act);
+          // Its whole input tells one call from the next, also two long scripts that begin alike.
+          if (input) st.callKeys.set(p.call_id, `${act.kind === 'command' ? 'command' : name}:${input.slice(0, 2_000)}`);
+        }
         st.activity = act;
         st.turnSteps += 1;
+        if (name !== 'update_plan') {
+          st.recent.unshift(act);
+          if (st.recent.length > 6) st.recent.length = 6;
+          st.timer.step();
+        }
         return;
       }
       case 'local_shell_call': {
@@ -424,9 +454,13 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
         const done = typeof p.call_id === 'string' ? st.open.get(p.call_id) : undefined;
         if (done) {
           done.endedAt = ts;
-          st.loops.observe(loopKey(done), done, codexFailure(p.output), ts, st.tokens ? totalTokens(st.tokens) : undefined);
+          const key = st.callKeys.get(p.call_id) ?? loopKey(done);
+          st.loops.observe(key, done, codexFailure(p.output), ts, st.tokens ? totalTokens(st.tokens) : undefined);
         }
-        if (typeof p.call_id === 'string') st.open.delete(p.call_id);
+        if (typeof p.call_id === 'string') {
+          st.open.delete(p.call_id);
+          st.callKeys.delete(p.call_id);
+        }
         st.activity = { kind: 'thinking', label: 'Thinking', startedAt: ts };
         return;
       }
@@ -437,6 +471,14 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
         st.activity = { kind: 'thinking', label: 'Thinking', startedAt: ts };
         return;
       case 'message':
+        if (p.role === 'user') {
+          const said = codexPrompt(contentText(p.content));
+          if (said) {
+            st.promptTitle ??= firstLine(said, 100);
+            st.loops.reset();
+          }
+          return;
+        }
         if (p.role === 'assistant' && contentText(p.content).trim()) {
           st.activity = { kind: 'message', label: 'Writing a reply', startedAt: ts };
         }
@@ -479,13 +521,13 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
       agent: 'codex',
       agentLabel: this.label,
       id: st.id,
-      title: st.title ?? 'Untitled session',
-      titleFromPrompt: st.title !== undefined ? true : undefined,
+      title: st.title ?? st.promptTitle ?? 'Untitled session',
+      titleFromPrompt: (st.title ?? st.promptTitle) !== undefined ? true : undefined,
       projectPath: st.cwd ? (findGitRoot(st.cwd) ?? st.cwd) : undefined,
       cwd: st.cwd,
       model: st.model,
       agentVersion: st.version,
-      host: st.originator === undefined ? undefined : /vscode|ide/.test(st.originator) ? 'editor' : /exec|mcp|sdk/.test(st.originator) ? 'app' : 'terminal',
+      host: codexHost(st.originator),
       status,
       statusDetail: detail,
       startedAt: st.startedAt,
@@ -505,6 +547,29 @@ export class CodexAdapter extends JsonlSessionAdapter<CodexState> {
       sources: [st.file],
     };
   }
+}
+
+/**
+ * The person's own words in a user message, or undefined for what Codex writes there itself: its
+ * context (`<environment_context>`, `<user_instructions>`, AGENTS.md). From an editor, the request
+ * follows the editor's context ("# Context from my IDE setup: … ## My request for Codex:").
+ */
+export function codexPrompt(text: string): string | undefined {
+  let t = text.trim();
+  const req = /^#{1,3}\s*My request for Codex:?[ \t]*$/im.exec(t);
+  if (req) t = t.slice(req.index + req[0].length).trim();
+  else if (/^#\s*Context from my IDE setup/i.test(t)) return undefined;
+  if (!t || t.startsWith('<') || /^#\s*AGENTS\.md\b/i.test(t)) return undefined;
+  return t;
+}
+
+/** Where a session runs, by the program that started it: `codex_cli_rs`, `codex_vscode`, `Codex Desktop`, `codex_exec`, … */
+function codexHost(originator: string | undefined): AgentSession['host'] {
+  if (originator === undefined) return undefined;
+  if (/desktop/i.test(originator)) return 'app';
+  if (/vscode|ide/.test(originator)) return 'editor';
+  if (/exec|mcp|sdk/.test(originator)) return 'app';
+  return 'terminal';
 }
 
 function loopOf(st: CodexState, status: AgentSession['status'], now: number): AgentSession['loop'] {

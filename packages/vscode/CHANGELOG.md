@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.9 — 2026-11-28
+
+- **Codex Desktop's checks are no longer sessions.** Under "approve for me", Codex Desktop asks a helper thread of its own, its guardian, about each command. Kvali showed every such check as a session: several "Untitled session" cards that sat idle while the real thread worked. They are no longer shown. The thread itself now has its title, from your first message (Codex Desktop writes messages differently from the Codex CLI), and its commands show on the card.
+- **Different commands failing in a row are no longer a loop.** Codex Desktop's commands reached Kvali without their command lines, so six different commands failing one after another looked like one command failing six times, and the card could warn that the agent was going in circles. Each command now counts on its own, also two long scripts that begin alike, and a new message from you ends the count.
+- **Resume says so when the codex command isn't installed.** Codex Desktop and Codex's editor extension bring their own copy of Codex, so `codex` is often not a command in the terminal, and Resume ended in "The term 'codex' is not recognized". Kvali now checks first, and says to continue in the Codex app or panel, or how to install the Codex CLI. Go to agent is no longer offered for a Codex Desktop session: Kvali cannot take you into the app.
+
 ## 0.7.8 — 2026-11-28
 
 - **A session a plan's limit stopped says so, and continues with one click.** When Claude Code stopped at the 5-hour limit, the weekly limit or a model's own (the Fable limit), the card said "Idle" and nothing more. Now it says "Stopped at the 5-hour limit · resets at 19:00", so does the status bar, and the card has **Continue**. After the reset, Continue picks the work up again at once: the session opens with "Continue where you left off" already sent. Before the reset, pick "Continue at 19:01" and Kvali continues it by itself once the limit resets, while the editor is open, or, when the limit is one model's own, continue now with another model. Claude Code also continues a session that is still open by itself at the reset ("Continue automatically at usage limit" in its `/config`); Kvali then sends nothing more.

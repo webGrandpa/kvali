@@ -36,7 +36,7 @@ Everything is local and read-only, with no telemetry. Kvali sends nothing anywhe
 | Agent | Progress from | Current step | Tokens | Cost | Plan limits | "Needs you" |
 | --- | --- | --- | --- | --- | --- | --- |
 | **Claude Code** (CLI, VS Code, Desktop) | Tasks / TodoWrite | ✓ | ✓ incl. subagents | ✓ built in | ✓ 5h + weekly, with the plugin¹ | ✓ exact, with the plugin¹ |
-| **Codex** (CLI, IDE) | `update_plan` | ✓ | ✓ | via `kvali.pricing` | ✓ 5h + weekly | — |
+| **Codex** (CLI, IDE, app) | `update_plan` | ✓ | ✓ | via `kvali.pricing` | ✓ 5h + weekly | — |
 | **Gemini CLI** | `write_todos` | ✓ | ✓ | via `kvali.pricing` | — | ✓ |
 | **Antigravity** agent | `task.md` | ✓ | not stored locally | — | — | ✓ |
 | **GitHub Copilot** (CLI, and VS Code chats on the Copilot CLI runtime²) | `update_todo`, the session's todo table | ✓ | ✓ | ✓ Claude models built in, others via `kvali.pricing` | — | ✓ exact |

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CONTINUE_PROMPT, limitOfOneModel, modelFamily, resumeCommand } from '../src/resume.ts';
+import { CONTINUE_PROMPT, limitOfOneModel, modelFamily, onPath, resumeCommand } from '../src/resume.ts';
 
 const ID = '3f2a9c1e-0b7d-4e2f-9a51-1c2d3e4f5a6b';
 
@@ -29,4 +29,16 @@ test('Which limits bind one model, and the family of a model', () => {
   assert.equal(modelFamily('claude-fable-5-2'), 'fable');
   assert.equal(modelFamily('claude-opus-5-5[1m]'), 'opus');
   assert.equal(modelFamily('gpt-6.2'), undefined);
+});
+
+test('onPath finds a command as a shell would, also npm\'s Windows shims', () => {
+  const posix = { PATH: '/usr/bin:/home/u/.npm-global/bin' };
+  assert.equal(onPath('codex', posix, 'darwin', (f) => f === '/home/u/.npm-global/bin/codex'), true);
+  assert.equal(onPath('codex', posix, 'linux', () => false), false);
+  const win = { Path: 'C:\\Windows\\system32;"C:\\Users\\u\\AppData\\Roaming\\npm"', PATHEXT: '.COM;.EXE;.BAT;.CMD' };
+  assert.equal(onPath('codex', win, 'win32', (f) => f === 'C:\\Users\\u\\AppData\\Roaming\\npm\\codex.cmd'), true);
+  assert.equal(onPath('codex', win, 'win32', (f) => f === 'C:\\Users\\u\\AppData\\Roaming\\npm\\codex.ps1'), true);
+  // npm's extensionless shim is for sh: PowerShell and cmd do not run it.
+  assert.equal(onPath('codex', win, 'win32', (f) => f === 'C:\\Users\\u\\AppData\\Roaming\\npm\\codex'), false);
+  assert.equal(onPath('codex', {}, 'win32', () => true), false);
 });

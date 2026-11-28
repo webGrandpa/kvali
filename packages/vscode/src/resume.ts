@@ -2,6 +2,8 @@
  * Resuming and continuing sessions: the command lines Kvali types into a terminal. Ids and model
  * names are checked before they reach a shell, and the only message is Kvali's own.
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import type { AgentId } from '@kvali/core';
 import { SAFE_ID } from './paths.ts';
 
@@ -38,4 +40,34 @@ export function resumeCommand(agent: AgentId, id: string, opts: { prompt?: strin
   // Plain words in double quotes read the same in zsh, bash, fish, PowerShell and cmd.
   if (opts.prompt) parts.push(`"${opts.prompt.replace(/["`$\\!%^&|<>]/g, '')}"`);
   return parts.join(' ');
+}
+
+function isFile(p: string): boolean {
+  try {
+    return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether a shell would find `cmd` on PATH: on Windows as `cmd` plus one of PATHEXT's endings or
+ * `.ps1` (npm puts `codex.cmd` and `codex.ps1` there). The Codex app and Codex's editor
+ * extension bring their own copy of codex, which is not on PATH.
+ */
+export function onPath(
+  cmd: string,
+  env: Record<string, string | undefined> = process.env,
+  platform: string = process.platform,
+  exists: (file: string) => boolean = isFile,
+): boolean {
+  const win = platform === 'win32';
+  const p = win ? path.win32 : path.posix;
+  const dirs = (env.PATH ?? env.Path ?? '')
+    .split(win ? ';' : ':')
+    .map((d) => d.trim().replace(/^"(.*)"$/, '$1'))
+    .filter(Boolean);
+  // Windows names are the same in any case: ".CMD" finds "codex.cmd".
+  const ends = win ? [...(env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean).map((e) => e.toLowerCase()), '.ps1'] : [''];
+  return dirs.some((d) => ends.some((e) => exists(p.join(d, cmd + e))));
 }
